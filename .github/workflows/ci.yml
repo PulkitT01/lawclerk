@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:          # run on every PR
+  push:
+    branches: [main]     # and after every merge into main
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7          # download your code
+
+      - uses: astral-sh/setup-uv@v9.0.0        # install uv
+        with:
+          enable-cache: true               # reuse downloads between runs
+
+      - name: Install dependencies
+        run: uv sync --locked              # fails if uv.lock is out of date
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src tests
+
+      - name: Test
+        run: uv run pytest
