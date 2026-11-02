@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Research agent for German energy law that verifies every citation"
 readme = "README.md"
 authors = [
-    { name = "PulkitT01", email = "85827394+PulkitT01@users.noreply.github.com" }
+    { name = "Pulkit Thukral", email = "85827394+PulkitT01@users.noreply.github.com" }
 ]
 requires-python = ">=3.13"
 dependencies = []
@@ -23,3 +23,21 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.3",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# E/W: style errors · F: real bugs (unused imports, undefined names)
+# I: sorted imports · B: common bug patterns · UP: modern Python syntax
+# SIM: simpler code · RUF: ruff's own checks
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
