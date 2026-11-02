@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7          # download your code
 
-      - uses: astral-sh/setup-uv@v9        # install uv
+      - uses: astral-sh/setup-uv@v9.0.0        # install uv
         with:
           enable-cache: true               # reuse downloads between runs
 
