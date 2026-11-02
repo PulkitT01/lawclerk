@@ -1,0 +1,28 @@
+repos:
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace      # removes spaces at line ends
+      - id: end-of-file-fixer        # ensures files end with a newline
+      - id: check-yaml               # catches broken YAML
+      - id: check-toml               # catches broken TOML
+      - id: check-added-large-files  # stops you committing huge files by accident
+
+  # Ruff: lint, then format
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # mypy: run the project's own mypy through uv
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src tests
+        language: system
+        types: [python]
+        pass_filenames: false
