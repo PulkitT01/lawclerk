@@ -1324,12 +1324,16 @@ dependencies = [
     { name = "pydantic" },
 ]
 
+[package.optional-dependencies]
+ocr = [
+    { name = "paddleocr", extra = ["doc-parser"] },
+    { name = "paddlepaddle" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
     { name = "mypy" },
-    { name = "paddleocr", extra = ["doc-parser"] },
-    { name = "paddlepaddle" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
@@ -1338,15 +1342,16 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "paddleocr", extras = ["doc-parser"], marker = "extra == 'ocr'", specifier = ">=3.7.0" },
+    { name = "paddlepaddle", marker = "extra == 'ocr'", specifier = ">=3.3.1" },
     { name = "pydantic", specifier = ">=2.14.2" },
 ]
+provides-extras = ["ocr"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "ipykernel", specifier = ">=7.4.0" },
     { name = "mypy", specifier = ">=2.4.1" },
-    { name = "paddleocr", extras = ["doc-parser"], specifier = ">=3.7.0" },
-    { name = "paddlepaddle", specifier = ">=3.3.1" },
     { name = "pre-commit", specifier = ">=4.7.0" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "ruff", specifier = ">=0.17.3" },

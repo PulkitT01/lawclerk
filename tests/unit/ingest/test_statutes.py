@@ -40,10 +40,6 @@ def test_download_zip_raises_on_http_error() -> None:
         statutes.download_zip(client, "missing")
 
 
-def test_sha1_matches_known_digest() -> None:
-    assert statutes.sha1(b"abc") == "a9993e364706816aba3e25717850c26c9cd0d89d"
-
-
 def test_save_if_changed_writes_new_file(tmp_path: Path) -> None:
     path = tmp_path / "law.xml"
     assert statutes.save_if_changed(path, b"v1") is True
@@ -75,6 +71,13 @@ def test_extract_zip_returns_only_changed_files(tmp_path: Path) -> None:
     statutes.extract_zip(make_zip({"law.xml": b"v1", "image.jpg": b"jpg"}), tmp_path)
     written = statutes.extract_zip(make_zip({"law.xml": b"v2", "image.jpg": b"jpg"}), tmp_path)
     assert written == [tmp_path / "law.xml"]
+
+
+def test_extract_zip_deletes_files_no_longer_in_the_archive(tmp_path: Path) -> None:
+    statutes.extract_zip(make_zip({"old.xml": b"v1", "image.jpg": b"jpg"}), tmp_path)
+    written = statutes.extract_zip(make_zip({"new.xml": b"v2", "image.jpg": b"jpg"}), tmp_path)
+    assert written == [tmp_path / "new.xml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["image.jpg", "new.xml"]
 
 
 def test_extract_zip_rejects_paths_outside_dest(tmp_path: Path) -> None:
@@ -227,6 +230,36 @@ def test_split_section_keeps_oversized_absatz_without_list(
     assert "no list to split on" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "content_xml",
+    [
+        "<Content>Vorwort<P>(1) erster Absatz</P></Content>",
+        "<Content><P>(1) erster Absatz</P>Nachsatz</Content>",
+        "<Content><P>(1) erster Absatz</P><table><row><entry>Wert</entry></row></table></Content>",
+    ],
+)
+def test_split_section_keeps_section_whole_when_text_is_outside_its_absaetze(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, content_xml: str
+) -> None:
+    monkeypatch.setattr(statutes, "MAX_CHUNK_CHARS", 10)
+    content = ET.fromstring(content_xml)
+    text = statutes.clean(statutes.render(content))
+    with caplog.at_level(logging.WARNING):
+        chunks = statutes.split_section(content, text, make_chunk())
+    assert [(c.id, c.text) for c in chunks] == [("D-s1", text)]
+    assert "text outside its Absätze" in caplog.text
+
+
+def test_split_section_splits_by_absatz_across_a_line_break(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(statutes, "MAX_CHUNK_CHARS", 10)
+    content = ET.fromstring("<Content><P>(1) erster</P><BR/><P>(2) zweiter</P></Content>")
+    text = statutes.clean(statutes.render(content))
+    chunks = statutes.split_section(content, text, make_chunk())
+    assert [c.id for c in chunks] == ["D-s1-abs1", "D-s1-abs2"]
+
+
 def test_split_section_skips_separator_line(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(statutes, "MAX_CHUNK_CHARS", 10)
     content = ET.fromstring("<Content><P>(1) erster</P><P><U>__________</U></P></Content>")
@@ -273,10 +306,8 @@ def test_chunk_norm_skips_section_without_text(caplog: pytest.LogCaptureFixture)
     assert "no text" in caplog.text
 
 
-def test_parse_statute_builds_chunks_with_heading_paths(tmp_path: Path) -> None:
-    xml_path = tmp_path / "law.xml"
-    xml_path.write_text(LAW_XML, encoding="utf-8")
-    chunks = statutes.parse_statute(xml_path, "TestG", "testg", {})
+def test_parse_statute_builds_chunks_with_heading_paths() -> None:
+    chunks = statutes.parse_statute(ET.fromstring(LAW_XML), "TestG", "testg", {})
     assert [(c.section, c.heading_path, c.status) for c in chunks] == [
         ("§ 1", ["Teil 1 Allgemeines", "Abschnitt 1 Ziele"], "in_force"),
         ("§ 2", ["Teil 2 Schluss"], "repealed"),
@@ -288,7 +319,7 @@ def test_parse_statute_builds_chunks_with_heading_paths(tmp_path: Path) -> None:
 
 def test_insert_formulas_puts_latex_where_the_image_stood() -> None:
     root = ET.fromstring('<P>vor <IMG SRC="a.jpg" Type="jpg"/> nach</P>')
-    statutes.insert_formulas(root, {"a.jpg": "x_{i}"}, "TestG")
+    statutes.insert_formulas(root, {"a.jpg": "$$x_{i}$$"}, "TestG")
     assert statutes.clean(statutes.render(root)) == "vor $$x_{i}$$ nach"
 
 
@@ -305,15 +336,13 @@ def test_insert_formulas_leaves_image_without_formula_empty_and_logs(
     ]
 
 
-def test_parse_statute_puts_formula_between_the_list_items_it_stood_in(tmp_path: Path) -> None:
+def test_parse_statute_puts_formula_between_the_list_items_it_stood_in() -> None:
     xml = LAW_XML.replace(
         "<P>Tabelle</P>",
         "<P><DL><DT>1.</DT><DD><LA>Formel:</LA><LA>"
         '<IMG SRC="f.jpg" Type="jpg"/></LA></DD><DT>2.</DT><DD><LA>Ende</LA></DD></DL></P>',
     )
-    xml_path = tmp_path / "law.xml"
-    xml_path.write_text(xml, encoding="utf-8")
-    chunks = statutes.parse_statute(xml_path, "TestG", "testg", {"f.jpg": "V_{it}=a"})
+    chunks = statutes.parse_statute(ET.fromstring(xml), "TestG", "testg", {"f.jpg": "$$V_{it}=a$$"})
     assert chunks[-1].text == "1. Formel:\n$$V_{it}=a$$\n2. Ende"
 
 
@@ -367,9 +396,9 @@ def test_main_reads_formula_images_and_puts_them_into_the_chunks(
     monkeypatch.setattr(statutes, "OUTPUT_DIR", tmp_path / "raw")
     monkeypatch.setattr(statutes, "PROCESSED_DIR", tmp_path / "processed")
     monkeypatch.setattr(statutes, "fetch_law", fake_fetch_law)
-    monkeypatch.setattr(formulas, "ocr_formula", lambda image: f"latex of {image.name}")
+    monkeypatch.setattr(formulas, "ocr_formula", lambda image: f"$$latex of {image.name}$$")
     statutes.main()
     cache = formulas.load_cache(tmp_path / "processed" / statutes.FORMULAS_FILE)
-    assert [entry.latex for entry in cache.values()] == ["latex of f.jpg"]
+    assert [entry.latex for entry in cache.values()] == ["$$latex of f.jpg$$"]
     lines = (tmp_path / "processed" / "testg.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(lines[-1])["text"] == "$$latex of f.jpg$$"

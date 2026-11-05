@@ -1,7 +1,9 @@
 """Command line entry point: ``uv run lawclerk ingest [statutes]``."""
 
 import argparse
+import logging
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Final
 
 from lawclerk.ingest import statutes
@@ -26,7 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the lawclerk command; argv defaults to the command line arguments."""
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # The data paths are relative, so running elsewhere would start a new, empty data/ folder
+    if not Path("pyproject.toml").is_file():
+        parser.error("run this from the repository root (the folder with pyproject.toml)")
+    logging.basicConfig(level=logging.INFO)
     kinds = [args.kind] if args.kind else list(INGESTERS)
     for kind in kinds:
         INGESTERS[kind]()

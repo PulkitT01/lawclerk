@@ -3,7 +3,6 @@
 Run from the repository root: ``uv run python -m lawclerk.ingest.statutes``
 """
 
-import hashlib
 import io
 import logging
 import re
@@ -69,25 +68,25 @@ def download_zip(client: httpx.Client, slug: str) -> bytes:
     return response.content
 
 
-def sha1(data: bytes) -> str:
-    """Return the SHA-1 hex digest of data."""
-    return hashlib.sha1(data).hexdigest()
-
-
 def save_if_changed(path: Path, data: bytes) -> bool:
-    """Write data to path unless the file there has the same SHA-1. Return True if written."""
-    if path.exists() and sha1(path.read_bytes()) == sha1(data):
+    """Write data to path unless the file there has the same bytes. Return True if written."""
+    if path.exists() and path.read_bytes() == data:
         return False
     path.write_bytes(data)
     return True
 
 
 def extract_zip(archive: bytes, dest: Path) -> list[Path]:
-    """Extract every file in archive into dest. Return the paths that were new or changed."""
+    """Extract every file in archive into dest. Return the paths that were new or changed.
+
+    Files in dest that are not in the archive are deleted, so dest holds only the latest
+    version of the law.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        for name in zf.namelist():
+        names = zf.namelist()
+        for name in names:
             # The archives are flat; anything with a directory part (e.g. "../x") is refused
             # so a malformed archive can't write outside dest.
             if Path(name).name != name:
@@ -95,6 +94,10 @@ def extract_zip(archive: bytes, dest: Path) -> list[Path]:
             path = dest / name
             if save_if_changed(path, zf.read(name)):
                 written.append(path)
+    for path in dest.iterdir():
+        if path.is_file() and path.name not in names:
+            logger.info("Deleting %s: no longer in the archive", path)
+            path.unlink()
     return written
 
 
@@ -166,6 +169,13 @@ def split_nummern(p: ET.Element) -> list[tuple[str, str]] | None:
 def split_section(content: ET.Element, text: str, whole: Chunk) -> list[Chunk]:
     """Split a section's content into chunks: whole, else by Absatz, else by Nummer."""
     if len(text) <= MAX_CHUNK_CHARS:
+        return [whole.model_copy(update={"text": text})]
+    # Only <P> elements are split out, so text anywhere else would be lost: keep it whole
+    outside_paragraphs = bool((content.text or "").strip()) or any(
+        child.tag not in ("P", "BR") or (child.tail or "").strip() for child in content
+    )
+    if outside_paragraphs:
+        logger.warning("%s %s: oversized section has text outside its Absätze", whole.law, whole.id)
         return [whole.model_copy(update={"text": text})]
 
     chunks: list[Chunk] = []
@@ -251,8 +261,9 @@ def chunk_norm(
 def insert_formulas(root: ET.Element, latex_by_file: Mapping[str, str], law: str) -> None:
     """Put the LaTeX of each formula image where the image stands in the XML.
 
-    render() emits an element's text, so the <IMG> element is given the formula as its text.
-    An image without a formula is left empty and logged.
+    render() emits an element's text, so the <IMG> element is given the formula as its text,
+    with the delimiters the OCR model returned. An image without a formula is left empty
+    and logged.
     """
     for img in root.iter("IMG"):
         name = Path(img.get("SRC", "")).name
@@ -260,17 +271,16 @@ def insert_formulas(root: ET.Element, latex_by_file: Mapping[str, str], law: str
         if latex is None:
             logger.warning("%s: no formula for image %r", law, name)
         else:
-            img.text = f"$${latex}$$"
+            img.text = latex
 
 
 def parse_statute(
-    xml_path: Path, law: str, slug: str, latex_by_file: Mapping[str, str]
+    root: ET.Element, law: str, slug: str, latex_by_file: Mapping[str, str]
 ) -> list[Chunk]:
-    """Parse a gesetze-im-internet.de XML file (gii-norm.dtd) into chunks.
+    """Turn the root of a gesetze-im-internet.de XML file (gii-norm.dtd) into chunks.
 
     latex_by_file maps the file name of each formula image to its LaTeX.
     """
-    root = ET.parse(xml_path).getroot()
     insert_formulas(root, latex_by_file, law)
     version = law_version(root)
     heading_path: list[str] = []
@@ -310,11 +320,12 @@ def main() -> None:
                 print(f"{name}: unchanged")
 
             (xml_path,) = (OUTPUT_DIR / slug).glob("*.xml")  # each zip holds exactly one XML
-            images = formulas.find_images(xml_path)
-            cache = formulas.update_cache(
+            root = ET.parse(xml_path).getroot()
+            images = formulas.find_images(root, xml_path.parent)
+            latex_by_file = formulas.update_cache(
                 images, PROCESSED_DIR / FORMULAS_FILE, formulas.ocr_formula
             )
-            chunks = parse_statute(xml_path, name, slug, formulas.latex_by_file(images, cache))
+            chunks = parse_statute(root, name, slug, latex_by_file)
             write_jsonl(chunks, PROCESSED_DIR / f"{slug}.jsonl")
             print(f"{name}: wrote {len(chunks)} chunks")
 

@@ -12,6 +12,13 @@ dependencies = [
     "pydantic>=2.14.2",
 ]
 
+[project.optional-dependencies]
+# Formula OCR, only needed when a statute has a formula image that isn't in the cache yet
+ocr = [
+    "paddleocr[doc-parser]>=3.7.0",
+    "paddlepaddle>=3.3.1",
+]
+
 [project.scripts]
 lawclerk = "lawclerk.cli:main"
 
@@ -23,8 +30,6 @@ build-backend = "uv_build"
 dev = [
     "ipykernel>=7.4.0",
     "mypy>=2.4.1",
-    "paddleocr[doc-parser]>=3.7.0",
-    "paddlepaddle>=3.3.1",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
     "ruff>=0.17.3",
@@ -43,6 +48,11 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
+
+[[tool.mypy.overrides]]
+# Ships no type hints, and isn't installed without the ocr extra
+module = "paddleocr"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

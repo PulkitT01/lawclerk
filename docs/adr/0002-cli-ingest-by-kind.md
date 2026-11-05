@@ -20,4 +20,4 @@ Status: accepted (05-11-2026)
 ## Consequences
 - No way to ingest a single law from the CLI. It always runs all laws of a kind.
 - A slow OCR run can start with plain `ingest`. Cached images make it fast after the first time.
-- The old stub `main()` in `src/lawclerk/__init__.py` and `tests/test_main.py` are unused and still to be deleted.
+- It refuses to run outside the repo root, because the `data/` paths are relative.

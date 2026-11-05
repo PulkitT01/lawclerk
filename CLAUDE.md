@@ -12,7 +12,7 @@ prompts or data are reused.
 
 ## Commands
 
-- Install: `uv sync`
+- Install: `uv sync` (add `--extra ocr` for formula OCR)
 - Format: `uv run ruff format .`
 - Lint: `uv run ruff check .`
 - Type check: `uv run mypy src tests`
@@ -28,7 +28,7 @@ All four checks must pass before a change is done. CI runs them on every PR.
 - `docs/adr/`: one file per design decision; `docs/devlog/`: daily notes
 - `data/`: downloads and processed files, gitignored
 
-Planned modules (not built yet): ingest, retrieval, api, agent, evals.
+Built: `ingest` (statutes), `cli`. Planned: retrieval, api, agent, evals.
 
 ## Conventions
 
