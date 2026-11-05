@@ -219,3 +219,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .vscode/
+
+# Data
+data/
+
+# Exploration notebooks (temporary)
+notebooks/
