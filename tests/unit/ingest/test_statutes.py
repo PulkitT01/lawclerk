@@ -3,12 +3,15 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import httpx
 import pytest
+from conftest import SourceArchive
 
-from lawclerk.ingest import formulas, statutes
+from lawclerk.ingest import archive, formulas, statutes
 
 
 def make_zip(files: dict[str, bytes]) -> bytes:
@@ -122,7 +125,7 @@ LAW_XML = """<?xml version="1.0" encoding="UTF-8"?>
 def make_chunk(**overrides: str) -> statutes.Chunk:
     fields = {"id": "D-s1", "section": "§ 1", "source_url": "u", "text": ""} | overrides
     return statutes.Chunk(
-        law="TestG", title="Zweck", heading_path=[], status="in_force", version=None, **fields
+        law="TestG", title="Zweck", heading_path=[], status="in_force", stand_note=None, **fields
     )
 
 
@@ -286,12 +289,45 @@ def test_law_version_is_none_without_stand_note() -> None:
     assert statutes.law_version(ET.fromstring("<dokumente><norm/></dokumente>")) is None
 
 
+@pytest.mark.parametrize(
+    ("title", "repealed"),
+    [
+        ("(weggefallen)", True),
+        ("(aufgehoben)", True),
+        ("Zweck (weggefallen)", False),
+        (None, False),
+    ],
+)
+def test_is_repealed(title: str | None, repealed: bool) -> None:
+    assert statutes.is_repealed(title) is repealed
+
+
+@pytest.mark.parametrize(
+    ("norm_xml", "expected"),
+    [
+        (
+            "<norm><metadaten><titel> Zweck </titel></metadaten><textdaten><text>"
+            "<Content><P>(1) a</P><P>(2) b</P></Content></text></textdaten></norm>",
+            ("Zweck", "(1) a\n(2) b"),
+        ),
+        (
+            "<norm><metadaten><titel>(weggefallen)</titel></metadaten>"
+            "<textdaten><text><Content><P/></Content></text></textdaten></norm>",
+            ("(weggefallen)", "(weggefallen)"),
+        ),
+        ("<norm><metadaten/></norm>", (None, "")),
+    ],
+)
+def test_section_text(norm_xml: str, expected: tuple[str | None, str]) -> None:
+    assert statutes.section_text(ET.fromstring(norm_xml)) == expected
+
+
 def test_chunk_norm_turns_repealed_section_into_stub() -> None:
     norm = ET.fromstring(
         '<norm doknr="D-s2"><metadaten><enbez>§ 2</enbez><titel>(weggefallen)</titel></metadaten>'
         "<textdaten><text><Content><P/></Content></text></textdaten></norm>"
     )
-    (chunk,) = statutes.chunk_norm(norm, law="TestG", slug="t", heading_path=[], version=None)
+    (chunk,) = statutes.chunk_norm(norm, law="TestG", slug="t", heading_path=[], stand_note=None)
     assert (chunk.id, chunk.status, chunk.text) == ("D-s2", "repealed", "(weggefallen)")
 
 
@@ -301,20 +337,23 @@ def test_chunk_norm_skips_section_without_text(caplog: pytest.LogCaptureFixture)
         "<textdaten><text><Content><P/></Content></text></textdaten></norm>"
     )
     with caplog.at_level(logging.WARNING):
-        chunks = statutes.chunk_norm(norm, law="TestG", slug="t", heading_path=[], version=None)
+        chunks = statutes.chunk_norm(norm, law="TestG", slug="t", heading_path=[], stand_note=None)
     assert chunks == []
     assert "no text" in caplog.text
 
 
-def test_parse_statute_builds_chunks_with_heading_paths() -> None:
-    chunks = statutes.parse_statute(ET.fromstring(LAW_XML), "TestG", "testg", {})
-    assert [(c.section, c.heading_path, c.status) for c in chunks] == [
-        ("§ 1", ["Teil 1 Allgemeines", "Abschnitt 1 Ziele"], "in_force"),
-        ("§ 2", ["Teil 2 Schluss"], "repealed"),
-        ("Anlage 1", [], "in_force"),
+def test_read_sections_gives_each_section_its_heading_path_and_text() -> None:
+    sections = statutes.read_sections(ET.fromstring(LAW_XML))
+    assert [(name, s.heading_path, s.title, s.text) for name, s in sections.items()] == [
+        ("§ 1", ["Teil 1 Allgemeines", "Abschnitt 1 Ziele"], "Zweck", "(1) Erster Absatz."),
+        ("§ 2", ["Teil 2 Schluss"], "(weggefallen)", "(weggefallen)"),
+        ("Anlage 1", [], "(zu § 1)", "Tabelle"),
     ]
-    assert chunks[0].version == "Zuletzt geändert durch X"
-    assert chunks[0].source_url == "https://www.gesetze-im-internet.de/testg/__1.html"
+
+
+def test_read_sections_leaves_out_section_without_text() -> None:
+    xml = LAW_XML.replace("<P>Tabelle</P>", "<P/>")
+    assert list(statutes.read_sections(ET.fromstring(xml))) == ["§ 1", "§ 2"]
 
 
 def test_insert_formulas_puts_latex_where_the_image_stood() -> None:
@@ -336,14 +375,29 @@ def test_insert_formulas_leaves_image_without_formula_empty_and_logs(
     ]
 
 
-def test_parse_statute_puts_formula_between_the_list_items_it_stood_in() -> None:
+def test_formula_lands_between_the_list_items_it_stood_in() -> None:
     xml = LAW_XML.replace(
         "<P>Tabelle</P>",
         "<P><DL><DT>1.</DT><DD><LA>Formel:</LA><LA>"
         '<IMG SRC="f.jpg" Type="jpg"/></LA></DD><DT>2.</DT><DD><LA>Ende</LA></DD></DL></P>',
     )
-    chunks = statutes.parse_statute(ET.fromstring(xml), "TestG", "testg", {"f.jpg": "$$V_{it}=a$$"})
-    assert chunks[-1].text == "1. Formel:\n$$V_{it}=a$$\n2. Ende"
+    root = ET.fromstring(xml)
+    statutes.insert_formulas(root, {"f.jpg": "$$V_{it}=a$$"}, "TestG")
+    assert statutes.read_sections(root)["Anlage 1"].text == "1. Formel:\n$$V_{it}=a$$\n2. Ende"
+
+
+def test_read_folder_puts_cached_formulas_into_the_xml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = tmp_path / "law"
+    folder.mkdir()
+    (folder / "law.xml").write_text('<P>vor <IMG SRC="f.jpg"/> nach</P>', encoding="utf-8")
+    (folder / "f.jpg").write_bytes(b"image bytes")
+    monkeypatch.setattr(statutes, "PROCESSED_DIR", tmp_path / "processed")
+    monkeypatch.setattr(formulas, "ocr_formula", lambda image: f"$${image.name}$$")
+    root = statutes.read_folder(folder, "TestG")
+    assert statutes.clean(statutes.render(root)) == "vor $$f.jpg$$ nach"
+    assert (tmp_path / "processed" / statutes.FORMULAS_FILE).exists()
 
 
 def test_write_jsonl_writes_one_chunk_per_line(tmp_path: Path) -> None:
@@ -355,47 +409,329 @@ def test_write_jsonl_writes_one_chunk_per_line(tmp_path: Path) -> None:
     assert "Übergang" in lines[0]  # umlauts stored as-is, not escaped
 
 
-@pytest.mark.parametrize(
-    ("changed", "fetch_report"), [(True, "updated law.xml"), (False, "unchanged")]
-)
-def test_main_fetches_parses_and_writes_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    changed: bool,
-    fetch_report: str,
+def test_write_jsonl_refuses_duplicate_ids(tmp_path: Path) -> None:
+    path = tmp_path / "law.jsonl"
+    with pytest.raises(ValueError, match=r"Duplicate ids.*'D-s1'"):
+        statutes.write_jsonl([make_chunk(), make_chunk(text="other")], path)
+    assert not path.exists()
+
+
+def test_split_section_adds_position_to_a_repeated_absatz_label(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    monkeypatch.setattr(statutes, "MAX_CHUNK_CHARS", 10)
+    content = ET.fromstring("<Content><P>(1f) erster</P><P>(2) b</P><P>(1f) zweiter</P></Content>")
+    text = statutes.clean(statutes.render(content))
+    with caplog.at_level(logging.WARNING):
+        chunks = statutes.split_section(content, text, make_chunk())
+    assert [(c.id, c.absatz) for c in chunks] == [
+        ("D-s1-abs1f", "1f"),
+        ("D-s1-abs2", "2"),
+        ("D-s1-abs1f-p3", "1f"),
+    ]
+    assert "Absatz (1f) appears twice" in caplog.text
+
+
+# Each snapshot: section name -> (doknr, title, text)
+SnapshotSections = dict[str, tuple[str, str, str]]
+
+
+def snapshot_xml(sections: SnapshotSections, stand: str = "Stand A") -> ET.Element:
+    norms = "".join(
+        f'<norm doknr="{doknr}"><metadaten><enbez>{name}</enbez><titel>{title}</titel>'
+        f"</metadaten><textdaten><text><Content><P>{text}</P></Content></text></textdaten></norm>"
+        for name, (doknr, title, text) in sections.items()
+    )
+    return ET.fromstring(
+        '<dokumente><norm doknr="D"><metadaten><standangabe><standtyp>Stand</standtyp>'
+        f"<standkommentar>{stand}</standkommentar></standangabe></metadaten></norm>"
+        f"{norms}</dokumente>"
+    )
+
+
+def build(*snapshots: tuple[str, ET.Element]) -> statutes.History:
+    """Build a history from (scrape date, root) pairs; the commit of snapshot i is "c<i>"."""
+    return statutes.build_history(
+        ((f"c{i}", date.fromisoformat(day), root) for i, (day, root) in enumerate(snapshots)),
+        law="TestG",
+        slug="testg",
+        xml_file="data/items/testg/L.xml",
+    )
+
+
+def spans(history: statutes.History) -> list[tuple[str, str, str | None, str | None, str]]:
+    """(version id, text, valid_from, valid_to, change) of every version."""
+
+    def day(value: date | None) -> str | None:
+        return str(value) if value else None
+
+    return [(v.id, v.text, day(v.valid_from), day(v.valid_to), v.change) for v in history.versions]
+
+
+S1 = {"§ 1": ("D-1", "Zweck", "eins")}
+
+
+def test_build_history_versions_in_the_first_snapshot_have_unknown_start() -> None:
+    history = build(("2019-06-10", snapshot_xml(S1 | {"§ 2": ("D-2", "Ziel", "zwei")})))
+    assert spans(history) == [
+        ("TestG § 1@2019-06-10", "eins", None, None, "initial"),
+        ("TestG § 2@2019-06-10", "zwei", None, None, "initial"),
+    ]
+    version = history.versions[0]
+    assert (version.first_seen, version.commit) == (date(2019, 6, 10), "c0")
+    assert (version.doknr, version.title, version.status) == ("D-1", "Zweck", "in_force")
+    assert version.stand_note == "Stand A"
+    assert version.source_url == "https://www.gesetze-im-internet.de/testg/__1.html"
+
+
+def test_build_history_marks_a_repealed_section_as_repealed() -> None:
+    history = build(("2019-06-10", snapshot_xml({"§ 2": ("D-2", "(weggefallen)", "")})))
+    (version,) = history.versions
+    assert (version.status, version.text) == ("repealed", "(weggefallen)")
+    assert [(c.status, c.text) for c in history.chunks] == [("repealed", "(weggefallen)")]
+
+
+def test_build_history_snapshot_without_text_change_adds_no_version() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2019-06-11", snapshot_xml(S1, stand="Stand B")),
+    )
+    assert spans(history) == [("TestG § 1@2019-06-10", "eins", None, None, "initial")]
+
+
+def test_build_history_new_doknr_is_an_amendment_and_ends_the_old_version() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2020-11-06", snapshot_xml({"§ 1": ("D-1b", "Zweck", "neu")}, stand="Stand B")),
+    )
+    assert spans(history) == [
+        ("TestG § 1@2019-06-10", "eins", None, "2020-11-06", "initial"),
+        ("TestG § 1@2020-11-06", "neu", "2020-11-06", None, "amendment"),
+    ]
+    old, new = history.versions
+    assert old.source_url == (
+        "https://github.com/QuantLaw/gesetze-im-internet/blob/c0/data/items/testg/L.xml"
+    )
+    assert new.source_url == "https://www.gesetze-im-internet.de/testg/__1.html"
+    assert (new.stand_note, new.commit) == ("Stand B", "c1")
+
+
+def test_build_history_same_doknr_with_new_text_is_a_correction() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2019-06-11", snapshot_xml({"§ 1": ("D-1", "Zweck", "eins, berichtigt")})),
+    )
+    assert spans(history)[1][-1] == "correction"
+
+
+def test_build_history_new_title_with_same_text_starts_a_version() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2019-06-11", snapshot_xml({"§ 1": ("D-1", "Neuer Titel", "eins")})),
+    )
+    assert [v.title for v in history.versions] == ["Zweck", "Neuer Titel"]
+
+
+def test_build_history_absence_ends_a_version_and_a_return_starts_a_new_one() -> None:
+    # Enough other sections that losing § 1 doesn't look like a broken snapshot
+    other = {f"§ {n}": (f"D-{n}", "T", f"text {n}") for n in range(2, 12)}
+    history = build(
+        ("2019-06-10", snapshot_xml(S1 | other)),
+        ("2019-06-11", snapshot_xml(other)),
+        ("2019-06-12", snapshot_xml(S1 | other)),
+    )
+    assert [span for span in spans(history) if span[0].startswith("TestG § 1@")] == [
+        ("TestG § 1@2019-06-10", "eins", None, "2019-06-11", "initial"),
+        ("TestG § 1@2019-06-12", "eins", "2019-06-12", None, "initial"),
+    ]
+    assert len(history.versions) == 12
+
+
+def test_build_history_text_that_returns_is_a_new_version() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2019-06-11", snapshot_xml({"§ 1": ("D-1b", "Zweck", "B")})),
+        ("2019-06-12", snapshot_xml(S1)),
+    )
+    assert [(v.text, v.change) for v in history.versions] == [
+        ("eins", "initial"),
+        ("B", "amendment"),
+        ("eins", "amendment"),
+    ]
+
+
+def test_build_history_skips_snapshot_that_lost_sections(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    full = {f"§ {n}": (f"D-{n}", "T", f"text {n}") for n in range(1, 11)}
+    broken = {name: value for name, value in full.items() if name < "§ 5"}
+    with caplog.at_level(logging.WARNING):
+        history = build(
+            ("2026-04-25", snapshot_xml(full)),
+            ("2026-05-05", snapshot_xml(broken)),
+            ("2026-05-07", snapshot_xml(full)),
+        )
+    assert history.skipped == [(date(2026, 5, 5), len(broken), 10)]
+    assert [v.valid_to for v in history.versions] == [None] * 10
+    assert list(history.newest) == list(full)
+    assert "skipped snapshot 2026-05-05" in caplog.text
+
+
+def test_build_history_chunks_each_version_and_links_it() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2020-11-06", snapshot_xml({"§ 1": ("D-1b", "Zweck", "neu")}, stand="Stand B")),
+    )
+    assert [(c.id, c.version_id, c.text, c.stand_note) for c in history.chunks] == [
+        ("D-1@2019-06-10", "TestG § 1@2019-06-10", "eins", "Stand A"),
+        ("D-1b@2020-11-06", "TestG § 1@2020-11-06", "neu", "Stand B"),
+    ]
+    assert [c.source_url for c in history.chunks] == [v.source_url for v in history.versions]
+
+
+def test_version_at_uses_exclusive_end_and_nothing_before_the_archive() -> None:
+    history = build(
+        ("2019-06-10", snapshot_xml(S1)),
+        ("2026-07-29", snapshot_xml({"§ 1": ("D-1b", "Zweck", "neu")})),
+    )
+    versions = history.versions
+
+    def text_on(day: str) -> str | None:
+        version = statutes.version_at(versions, "§ 1", date.fromisoformat(day))
+        return version.text if version else None
+
+    assert text_on("2019-06-09") is None
+    assert text_on("2019-06-10") == "eins"
+    assert text_on("2026-07-28") == "eins"
+    assert text_on("2026-07-29") == "neu"
+    assert statutes.version_at(versions, "§ 9", date(2026, 8, 1)) is None
+
+
+def test_archive_snapshots_reads_each_commit_with_its_own_images(
+    source_archive: SourceArchive, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    xml = '<dokumente><norm doknr="D"><metadaten><enbez>§ 1</enbez></metadaten><textdaten>'
+    xml += (
+        '<text><Content><P><IMG SRC="f.jpg"/></P></Content></text></textdaten></norm></dokumente>'
+    )
+    law = {"data/items/testg/L.xml": xml.encode()}
+    first = source_archive.commit("2019-06-10", law | {"data/items/testg/f.jpg": b"old image"})
+    rebuilt = {
+        "data/items/testg/L.xml": xml.replace('doknr="D"', 'doknr="D" builddate="2"').encode()
+    }
+    second = source_archive.commit("2020-08-20", rebuilt | {"data/items/testg/f.jpg": b"new image"})
+    monkeypatch.setattr(statutes, "PROCESSED_DIR", tmp_path / "processed")
+    monkeypatch.setattr(formulas, "ocr_formula", lambda image: image.read_text())
+    snapshots = archive.snapshots(source_archive.path, "data/items/testg/L.xml")
+    read = statutes.archive_snapshots(source_archive.path, snapshots, "data/items/testg/L.xml", "T")
+    assert [
+        (commit, day, statutes.read_sections(root)["§ 1"].text) for commit, day, root in read
+    ] == [
+        (first, date(2019, 6, 10), "old image"),
+        (second, date(2020, 8, 20), "new image"),
+    ]
+
+
+def test_changed_sections_lists_changed_added_and_removed_sections() -> None:
+    old = statutes.read_sections(
+        snapshot_xml(S1 | {"§ 2": ("D-2", "T", "a"), "§ 3": ("D-3", "T", "c")})
+    )
+    new = statutes.read_sections(
+        snapshot_xml(S1 | {"§ 2": ("D-x", "T", "b"), "§ 4": ("D-4", "T", "d")})
+    )
+    assert statutes.changed_sections(old, new) == ["§ 2", "§ 3", "§ 4"]
+    assert statutes.changed_sections(old, old) == []
+
+
+ARCHIVE_XML = "data/items/testg/BJNR1.xml"
+AMENDED_XML = LAW_XML.replace("(1) Erster Absatz.", "(1) Neuer Absatz.")
+
+
+@pytest.fixture
+def main_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source_archive: SourceArchive
+) -> Callable[[str], None]:
+    """Point main at tmp_path and the local archive; return a setter for the live XML."""
+    live = {"xml": LAW_XML}
+
     def fake_fetch_law(client: httpx.Client, slug: str, output_dir: Path) -> list[Path]:
         path = output_dir / slug / "law.xml"
-        path.parent.mkdir(parents=True)
-        path.write_text(LAW_XML, encoding="utf-8")
-        return [path] if changed else []
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(live["xml"], encoding="utf-8")
+        return [path]
 
+    real_update = archive.update
+    monkeypatch.setattr(archive, "update", lambda repo: real_update(repo, str(source_archive.path)))
     monkeypatch.setattr(statutes, "LAWS", {"TestG": "testg"})
     monkeypatch.setattr(statutes, "OUTPUT_DIR", tmp_path / "raw")
+    monkeypatch.setattr(statutes, "ARCHIVE_DIR", tmp_path / "raw" / "archive.git")
     monkeypatch.setattr(statutes, "PROCESSED_DIR", tmp_path / "processed")
     monkeypatch.setattr(statutes, "fetch_law", fake_fetch_law)
-    statutes.main()
-    assert capsys.readouterr().out == f"TestG: {fetch_report}\nTestG: wrote 3 chunks\n"
-    lines = (tmp_path / "processed" / "testg.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["section"] for line in lines] == ["§ 1", "§ 2", "Anlage 1"]
+    return lambda xml: live.update(xml=xml)
+
+
+def test_main_builds_history_from_the_archive_and_writes_versions_and_chunks(
+    main_setup: Callable[[str], None],
+    source_archive: SourceArchive,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    today = str(date.today())
+    source_archive.commit("2019-06-10", {ARCHIVE_XML: LAW_XML.encode()})
+    source_archive.commit(today, {ARCHIVE_XML: AMENDED_XML.encode()})
+    main_setup(AMENDED_XML)
+    with caplog.at_level(logging.WARNING):
+        statutes.main()
+    assert capsys.readouterr().out == (
+        f"TestG: newest archive scrape {today}, 2 snapshots\n"
+        "TestG: 4 versions of 3 sections, 3 open\n"
+        "TestG: wrote 4 chunks\n"
+        "TestG: live text matches the newest snapshot\n"
+    )
+    assert caplog.text == ""
+    processed = tmp_path / "processed"
+    versions = (processed / "testg.versions.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in versions] == [
+        "TestG § 1@2019-06-10",
+        "TestG § 2@2019-06-10",
+        "TestG Anlage 1@2019-06-10",
+        f"TestG § 1@{today}",
+    ]
+    chunks = (processed / "testg.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in chunks] == [
+        "D-s1@2019-06-10",
+        "D-s2@2019-06-10",
+        "D-an@2019-06-10",
+        f"D-s1@{today}",
+    ]
+
+
+def test_main_warns_about_a_stale_archive_and_changed_live_text(
+    main_setup: Callable[[str], None],
+    source_archive: SourceArchive,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source_archive.commit("2019-06-10", {ARCHIVE_XML: LAW_XML.encode()})
+    main_setup(AMENDED_XML)
+    with caplog.at_level(logging.WARNING):
+        statutes.main()
+    assert "The archive's newest scrape is from 2019-06-10" in caplog.text
+    assert "TestG: live text differs from the newest snapshot in § 1" in caplog.text
+    assert "live text matches" not in capsys.readouterr().out
 
 
 def test_main_reads_formula_images_and_puts_them_into_the_chunks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    main_setup: Callable[[str], None],
+    source_archive: SourceArchive,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    def fake_fetch_law(client: httpx.Client, slug: str, output_dir: Path) -> list[Path]:
-        folder = output_dir / slug
-        folder.mkdir(parents=True)
-        xml = LAW_XML.replace("<P>Tabelle</P>", '<P><IMG SRC="f.jpg"/></P>')
-        (folder / "law.xml").write_text(xml, encoding="utf-8")
-        (folder / "f.jpg").write_bytes(b"image bytes")
-        return []
-
-    monkeypatch.setattr(statutes, "LAWS", {"TestG": "testg"})
-    monkeypatch.setattr(statutes, "OUTPUT_DIR", tmp_path / "raw")
-    monkeypatch.setattr(statutes, "PROCESSED_DIR", tmp_path / "processed")
-    monkeypatch.setattr(statutes, "fetch_law", fake_fetch_law)
+    xml = LAW_XML.replace("<P>Tabelle</P>", '<P><IMG SRC="f.jpg"/></P>')
+    source_archive.commit(
+        "2019-06-10", {ARCHIVE_XML: xml.encode(), "data/items/testg/f.jpg": b"image bytes"}
+    )
     monkeypatch.setattr(formulas, "ocr_formula", lambda image: f"$$latex of {image.name}$$")
     statutes.main()
     cache = formulas.load_cache(tmp_path / "processed" / statutes.FORMULAS_FILE)
