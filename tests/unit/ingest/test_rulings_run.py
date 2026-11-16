@@ -406,3 +406,10 @@ def test_main_returns_on_an_ok_run(
     monkeypatch.setattr(run, "ingest", lambda client: header)
     run.main()
     assert capsys.readouterr().out.startswith("rulings: ok;")
+
+
+def test_status_lines_are_flushed_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    printed: list[tuple[str, bool]] = []
+    monkeypatch.setattr("builtins.print", lambda text, flush=False: printed.append((text, flush)))
+    run.say("rulings: first download")
+    assert printed == [("rulings: first download", True)]

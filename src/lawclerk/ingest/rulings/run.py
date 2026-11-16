@@ -69,11 +69,16 @@ class Run:
     lines: list[AnyLine] = field(default_factory=list)
 
 
+def say(text: str) -> None:
+    """Print a status line now, not when the buffer fills: a killed run keeps its last lines."""
+    print(text, flush=True)
+
+
 def ingest(
     client: httpx.Client,
     root: Path = ROOT,
     now: datetime | None = None,
-    announce: Callable[[str], None] = print,
+    announce: Callable[[str], None] = say,
 ) -> RunHeader:
     """Run once: crawl, compare with the last good snapshot, download, write a snapshot.
 
@@ -456,7 +461,7 @@ def main() -> None:
     """Fetch the BK6 documents into ROOT. Exits 1 on a broken run, 2 on a partial one."""
     with make_client() as client:
         header = ingest(client)
-    print(summary(header, datetime.now(UTC)))
+    say(summary(header, datetime.now(UTC)))
     if header.status == "broken":
         raise SystemExit(f"rulings: broken run, nothing recorded as gone: {header.reason}")
     if header.status == "partial":
