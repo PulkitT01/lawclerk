@@ -32,7 +32,8 @@ from conftest import (
 )
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import FileLine, Link, PageLine, RowLine, SkippedLine, fetch, parse
+from lawclerk.ingest.rulings import fetch, parse, snapshot
+from lawclerk.ingest.rulings.snapshot import FileLine, Link, PageLine, RowLine, SkippedLine
 
 # --- URLs, paths, text ---------------------------------------------------------------------
 
@@ -102,39 +103,13 @@ def test_store_refuses_other_content_under_the_same_name(tmp_path: Path) -> None
         rulings.store_bytes(tmp_path, PDF, b"version 1", "r2")
 
 
-def test_read_snapshot_refuses_an_unknown_format(tmp_path: Path) -> None:
-    header = rulings.RunHeader(run="r", status="ok", previous=None, format=99)
-    path = tmp_path / "s.jsonl"
-    path.write_text(header.model_dump_json() + "\n")
-    with pytest.raises(ValueError, match="format 99"):
-        rulings.read_snapshot(path)
-
-
-def test_snapshot_round_trip(tmp_path: Path) -> None:
-    header = rulings.RunHeader(run=rulings.run_id(T0), status="ok", previous=None)
-    row = RowLine(
-        seen="observed",
-        list_page=CLOSED,
-        aktenzeichen="BK6-1",
-        cells=["BK6-1", "", "", ""],
-        links=[],
-        first_seen="r",
-        baseline=True,
-    )
-    path = rulings.write_snapshot(tmp_path, rulings.Snapshot(header, [row]))
-    assert path.name == "2026-11-16T09-00-00Z.jsonl"
-    assert rulings.read_snapshot(path).lines == [row]
-    with pytest.raises(FileExistsError):
-        rulings.write_snapshot(tmp_path, rulings.Snapshot(header, []))
-
-
 def known_files(count: int) -> rulings.Previous:
     """A last good run at T0 with count files, file 1 checked longest ago."""
-    previous = rulings.Previous(run=rulings.run_id(T0))
-    stored = rulings.Stored(path="p", sha256="s", run="r")
+    previous = rulings.Previous(run=snapshot.run_id(T0))
+    stored = snapshot.Stored(path="p", sha256="s", run="r")
     for number in range(1, count + 1):
         url = f"{SITE}/f{number:02d}.pdf"
-        checked = rulings.run_id(T0 - timedelta(days=count - number))
+        checked = snapshot.run_id(T0 - timedelta(days=count - number))
         previous.files[url] = FileLine(
             seen="observed",
             url=url,
@@ -166,13 +141,13 @@ def test_rotation_share_follows_the_time_since_the_last_good_run(
 ) -> None:
     previous = known_files(60)
     picked = rulings.rotation(
-        previous, [*previous.files, f"{SITE}/new.pdf"], rulings.run_id(T0 + since)
+        previous, [*previous.files, f"{SITE}/new.pdf"], snapshot.run_id(T0 + since)
     )
     assert picked == {f"{SITE}/f{number:02d}.pdf" for number in range(1, due + 1)}
 
 
 def test_rotation_before_the_first_good_run_picks_nothing() -> None:
-    assert rulings.rotation(rulings.Previous(), [PDF], rulings.run_id(T0)) == set()
+    assert rulings.rotation(rulings.Previous(), [PDF], snapshot.run_id(T0)) == set()
 
 
 def crawl_of(loaded: dict[str, set[str]], failed: tuple[str, ...] = ()) -> rulings.Crawl:
@@ -219,7 +194,7 @@ def test_origin_keeps_first_seen_and_marks_the_first_run_as_baseline() -> None:
 
 def test_check_counts_returns_the_rule_that_breaks_the_run() -> None:
     previous = rulings.Previous(
-        run="r0", header=rulings.RunHeader(run="r0", status="ok", previous=None, rows=10)
+        run="r0", header=snapshot.RunHeader(run="r0", status="ok", previous=None, rows=10)
     )
     result = crawl_of({"A": set()})
     result.rows = [("list", parse.Row(["x"], []))] * 8
@@ -230,7 +205,7 @@ def test_check_counts_returns_the_rule_that_breaks_the_run() -> None:
 
 
 def test_summary_gives_the_age_of_the_oldest_check() -> None:
-    header = rulings.RunHeader(
+    header = snapshot.RunHeader(
         run="r", status="ok", previous=None, oldest_check="2026-10-17T09:00:00Z"
     )
     assert "oldest check 30 days ago" in rulings.summary(header, T0)
@@ -305,7 +280,7 @@ def test_first_run_stores_everything_as_baseline(site: FakeSite, tmp_path: Path)
     assert isinstance(pdf_line, FileLine)
     assert (pdf_line.v, pdf_line.hash, pdf_line.baseline) == ("1", "checked", True)
     assert (tmp_path / pdf_line.stored.path).read_bytes() == b"%PDF beschluss v1"
-    assert pdf_line.stored.run == pdf_line.first_seen == rulings.run_id(T0)
+    assert pdf_line.stored.run == pdf_line.first_seen == snapshot.run_id(T0)
     assert all(line.baseline for line in lines(tmp_path))
     video = found[VIDEO]
     assert isinstance(video, SkippedLine)
@@ -314,7 +289,7 @@ def test_first_run_stores_everything_as_baseline(site: FakeSite, tmp_path: Path)
     rows = [line for line in lines(tmp_path) if isinstance(line, RowLine)]
     assert rows[0].cells == ["BK6-26-001", "Festlegung zu X", "Netz GmbH", ""]
     assert rows[0].links[0].href == f"{GZ}/BK6-26-001_beschluss.html?nn=861698"
-    assert rulings.journal_path(tmp_path, rulings.run_id(T0)).is_file()  # kept, not deleted
+    assert snapshot.journal_path(tmp_path, snapshot.run_id(T0)).is_file()  # kept, not deleted
 
 
 def test_second_run_downloads_nothing_and_changes_only_the_record(
@@ -331,7 +306,7 @@ def test_second_run_downloads_nothing_and_changes_only_the_record(
     assert header.files_not_modified == 1  # the data-host file, asked with its ETag
     pdf_line = by_url(tmp_path, T0 + timedelta(hours=1))[PDF]
     assert isinstance(pdf_line, FileLine)
-    assert (pdf_line.hash, pdf_line.checked) == ("carried", rulings.run_id(T0))
+    assert (pdf_line.hash, pdf_line.checked) == ("carried", snapshot.run_id(T0))
     assert pdf_line.baseline
 
 
@@ -343,7 +318,7 @@ def test_changed_v_stores_the_new_copy_beside_the_old(site: FakeSite, tmp_path: 
     header = run_once(site, tmp_path, later)
     new = by_url(tmp_path, later)[PDF]
     assert isinstance(old, FileLine) and isinstance(new, FileLine)
-    assert (new.v, new.stored.run, new.first_seen) == ("3", rulings.run_id(later), old.first_seen)
+    assert (new.v, new.stored.run, new.first_seen) == ("3", snapshot.run_id(later), old.first_seen)
     assert (tmp_path / old.stored.path).read_bytes() == b"%PDF beschluss v1"
     assert (tmp_path / new.stored.path).read_bytes() == b"%PDF beschluss v3"
     assert header.v_differs == 1
@@ -360,7 +335,7 @@ def test_a_link_its_page_no_longer_shows_is_gone_and_its_file_stays(
     header = run_once(site, tmp_path, later)
     gone = by_url(tmp_path, later)[PDF]
     assert isinstance(old, FileLine) and isinstance(gone, FileLine)
-    assert (gone.seen, gone.gone_since) == ("gone", rulings.run_id(later))
+    assert (gone.seen, gone.gone_since) == ("gone", snapshot.run_id(later))
     assert (tmp_path / old.stored.path).is_file()
     assert header.gone == 1
     even_later = later + timedelta(days=1)
@@ -502,11 +477,11 @@ def test_a_broken_run_records_nothing_and_the_next_compares_with_the_last_good(
     broken_at = T0 + timedelta(days=1)
     header = run_once(site, tmp_path, broken_at)
     assert (header.status, header.broken_rule) == ("broken", "list_failed")
-    assert header.previous == rulings.run_id(T0)
+    assert header.previous == snapshot.run_id(T0)
     assert lines(tmp_path, broken_at) == []
     site.routes[CLOSED] = FakeSite().routes[CLOSED]
     later = broken_at + timedelta(days=1)
-    assert run_once(site, tmp_path, later).previous == rulings.run_id(T0)
+    assert run_once(site, tmp_path, later).previous == snapshot.run_id(T0)
 
 
 def test_too_few_pages_is_a_broken_run(site: FakeSite, tmp_path: Path) -> None:
@@ -578,13 +553,13 @@ def test_a_crashed_run_is_continued_without_downloading_again(
 ) -> None:
     finish = rulings.finish
 
-    def crash(state: rulings.Run, counts: rulings.FileCounts) -> rulings.RunHeader:
+    def crash(state: rulings.Run, counts: rulings.FileCounts) -> snapshot.RunHeader:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(rulings, "finish", crash)
     with pytest.raises(KeyboardInterrupt):
         run_once(site, tmp_path)
-    assert rulings.journal_path(tmp_path, rulings.run_id(T0)).is_file()
+    assert snapshot.journal_path(tmp_path, snapshot.run_id(T0)).is_file()
     monkeypatch.setattr(rulings, "finish", finish)
     site.forget()
     later = T0 + timedelta(hours=1)
@@ -614,11 +589,11 @@ def test_a_cut_off_journal_line_is_ignored(site: FakeSite, tmp_path: Path) -> No
     run_once(site, tmp_path)
     good = by_url(tmp_path)[PDF]
     assert isinstance(good, FileLine)
-    crashed = rulings.journal_path(tmp_path, rulings.run_id(T0 + timedelta(hours=1)))
+    crashed = snapshot.journal_path(tmp_path, snapshot.run_id(T0 + timedelta(hours=1)))
     crashed.write_text(good.model_dump_json() + "\n" + good.model_dump_json()[:40])
     # The good run's own journal is ignored; the crashed one is read up to its cut-off line
-    assert rulings.read_journals(tmp_path, rulings.run_id(T0)) == {PDF: good}
-    assert rulings.read_journals(tmp_path, rulings.run_id(T0 + timedelta(hours=2))) == {}
+    assert snapshot.read_journals(tmp_path, snapshot.run_id(T0)) == {PDF: good}
+    assert snapshot.read_journals(tmp_path, snapshot.run_id(T0 + timedelta(hours=2))) == {}
 
 
 @pytest.mark.parametrize(
@@ -629,7 +604,7 @@ def test_main_exits_non_zero_on_a_broken_or_partial_run(
     status: Literal["partial", "broken"], code: int | str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reason = "list page failed" if status == "broken" else None
-    header = rulings.RunHeader(run="r", status=status, reason=reason, previous=None)
+    header = snapshot.RunHeader(run="r", status=status, reason=reason, previous=None)
     monkeypatch.setattr(fetch, "make_client", httpx.Client)
     monkeypatch.setattr(rulings, "ingest", lambda client: header)
     with pytest.raises(SystemExit) as exit_info:
@@ -640,7 +615,7 @@ def test_main_exits_non_zero_on_a_broken_or_partial_run(
 def test_main_returns_on_an_ok_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    header = rulings.RunHeader(run="r", status="ok", previous=None)
+    header = snapshot.RunHeader(run="r", status="ok", previous=None)
     monkeypatch.setattr(fetch, "make_client", httpx.Client)
     monkeypatch.setattr(rulings, "ingest", lambda client: header)
     rulings.main()

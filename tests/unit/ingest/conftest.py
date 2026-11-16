@@ -9,7 +9,8 @@ import httpx
 import pytest
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import RowLine, fetch
+from lawclerk.ingest.rulings import fetch, snapshot
+from lawclerk.ingest.rulings.snapshot import RowLine
 
 
 class SourceArchive:
@@ -226,18 +227,18 @@ def site() -> FakeSite:
 
 def run_once(
     site: FakeSite, root: Path, when: datetime = T0, said: list[str] | None = None
-) -> rulings.RunHeader:
+) -> snapshot.RunHeader:
     with site.client() as client:
         return rulings.ingest(client, root, when, (said if said is not None else []).append)
 
 
-def lines(root: Path, when: datetime = T0) -> list[rulings.AnyLine]:
-    return rulings.read_snapshot(rulings.snapshot_path(root, rulings.run_id(when))).lines
+def lines(root: Path, when: datetime = T0) -> list[snapshot.AnyLine]:
+    return snapshot.read_snapshot(snapshot.snapshot_path(root, snapshot.run_id(when))).lines
 
 
-def by_url(root: Path, when: datetime = T0) -> dict[str, rulings.AnyLine]:
+def by_url(root: Path, when: datetime = T0) -> dict[str, snapshot.AnyLine]:
     return {line.url: line for line in lines(root, when) if not isinstance(line, RowLine)}
 
 
 def stored_files(root: Path) -> set[Path]:
-    return {path for path in root.rglob("*") if path.is_file() and rulings.RUNS not in path.parts}
+    return {path for path in root.rglob("*") if path.is_file() and snapshot.RUNS not in path.parts}
