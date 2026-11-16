@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import RowLine
+from lawclerk.ingest.rulings import RowLine, fetch
 
 
 class SourceArchive:
@@ -216,7 +216,7 @@ class FakeSite:
 @pytest.fixture
 def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retry without waiting; the rulings test modules use it for every test."""
-    monkeypatch.setattr(rulings, "BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(fetch, "BACKOFF_SECONDS", 0.0)
 
 
 @pytest.fixture

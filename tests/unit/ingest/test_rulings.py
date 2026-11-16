@@ -32,35 +32,11 @@ from conftest import (
 )
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import FileLine, Link, PageLine, RowLine, SkippedLine
+from lawclerk.ingest.rulings import FileLine, Link, PageLine, RowLine, SkippedLine, fetch
 
 # --- URLs, paths, text ---------------------------------------------------------------------
 
 pytestmark = pytest.mark.usefixtures("no_backoff")
-
-
-def test_url_key_drops_query_and_fragment_and_uses_https() -> None:
-    assert rulings.url_key("http://www.bundesnetzagentur.de/a/b.html?nn=1#x") == f"{SITE}/a/b.html"
-    assert rulings.url_key("http://www.bundesnetzagentur.de") == f"{SITE}/"
-
-
-def test_query_v_reads_the_v_parameter() -> None:
-    assert rulings.query_v("/a.pdf?__blob=publicationFile&v=3") == "3"
-    assert rulings.query_v("/a.pdf?__blob=publicationFile") is None
-
-
-@pytest.mark.parametrize(
-    ("path", "is_page"),
-    [
-        ("/a/b.html", True),
-        ("/", True),
-        ("/a/start", True),
-        ("/a/b.pdf", False),
-        ("/a/b.mp4", False),
-    ],
-)
-def test_is_page_path(path: str, is_page: bool) -> None:
-    assert rulings.is_page_path(path) is is_page
 
 
 def test_in_boundary_takes_all_of_bk6_gz_and_bk06() -> None:
@@ -305,30 +281,6 @@ def test_check_counts_returns_the_rule_that_breaks_the_run() -> None:
     assert broken is not None and broken.rule == "too_few_rows"
     result.rows = [("list", rulings.Row(["x"], []))] * 9
     assert rulings.check_counts(result, previous) is None
-
-
-def test_with_retries_retries_then_gives_up() -> None:
-    attempts: list[int] = []
-
-    def failing() -> str:
-        attempts.append(1)
-        raise httpx.ConnectError("down")
-
-    with pytest.raises(rulings.FetchError):
-        rulings.with_retries(failing, "u")
-    assert len(attempts) == rulings.MAX_RETRIES + 1
-
-
-def test_get_retries_overload_and_detects_the_firewall_page() -> None:
-    answers = iter([httpx.Response(503), httpx.Response(200, text="ok")])
-    with httpx.Client(transport=httpx.MockTransport(lambda _: next(answers))) as client:
-        assert rulings.get(client, f"{SITE}/x.html").text == "ok"
-    rejected = httpx.Response(200, text="<html>The requested URL was rejected.</html>")
-    with (
-        httpx.Client(transport=httpx.MockTransport(lambda _: rejected)) as client,
-        pytest.raises(rulings.FirewallError),
-    ):
-        rulings.get(client, f"{SITE}/x.html")
 
 
 def test_summary_gives_the_age_of_the_oldest_check() -> None:
@@ -732,7 +684,7 @@ def test_main_exits_non_zero_on_a_broken_or_partial_run(
 ) -> None:
     reason = "list page failed" if status == "broken" else None
     header = rulings.RunHeader(run="r", status=status, reason=reason, previous=None)
-    monkeypatch.setattr(rulings, "make_client", httpx.Client)
+    monkeypatch.setattr(fetch, "make_client", httpx.Client)
     monkeypatch.setattr(rulings, "ingest", lambda client: header)
     with pytest.raises(SystemExit) as exit_info:
         rulings.main()
@@ -743,7 +695,7 @@ def test_main_returns_on_an_ok_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     header = rulings.RunHeader(run="r", status="ok", previous=None)
-    monkeypatch.setattr(rulings, "make_client", httpx.Client)
+    monkeypatch.setattr(fetch, "make_client", httpx.Client)
     monkeypatch.setattr(rulings, "ingest", lambda client: header)
     rulings.main()
     assert capsys.readouterr().out.startswith("rulings: ok;")

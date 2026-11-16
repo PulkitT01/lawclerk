@@ -13,6 +13,7 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 from lawclerk.ingest import rulings
+from lawclerk.ingest.rulings import fetch
 
 failures = 0
 GZ, TOPICS = rulings.BOUNDARY
@@ -40,7 +41,7 @@ def check(name: str, problems: list[str]) -> None:
 
 def main() -> None:
     """Crawl, print the counts and run the checks."""
-    with rulings.make_client() as client:
+    with fetch.make_client() as client:
         result = rulings.crawl(client)
     pages = result.pages
     loaded = result.loaded()
