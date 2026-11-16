@@ -8,8 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import fetch, snapshot
+from lawclerk.ingest.rulings import fetch, run, snapshot
 from lawclerk.ingest.rulings.crawl import LISTS
 from lawclerk.ingest.rulings.snapshot import RowLine
 
@@ -230,7 +229,7 @@ def run_once(
     site: FakeSite, root: Path, when: datetime = T0, said: list[str] | None = None
 ) -> snapshot.RunHeader:
     with site.client() as client:
-        return rulings.ingest(client, root, when, (said if said is not None else []).append)
+        return run.ingest(client, root, when, (said if said is not None else []).append)
 
 
 def lines(root: Path, when: datetime = T0) -> list[snapshot.AnyLine]:

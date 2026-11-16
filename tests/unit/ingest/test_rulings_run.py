@@ -28,8 +28,7 @@ from conftest import (
     stored_files,
 )
 
-from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import changes, fetch, snapshot, store
+from lawclerk.ingest.rulings import changes, fetch, run, snapshot, store
 from lawclerk.ingest.rulings.snapshot import FileLine, PageLine, RowLine, SkippedLine
 
 # --- URLs, paths, text ---------------------------------------------------------------------
@@ -47,7 +46,7 @@ def test_summary_gives_the_age_of_the_oldest_check() -> None:
     header = snapshot.RunHeader(
         run="r", status="ok", previous=None, oldest_check="2026-10-17T09:00:00Z"
     )
-    assert "oldest check 30 days ago" in rulings.summary(header, T0)
+    assert "oldest check 30 days ago" in run.summary(header, T0)
 
 
 # --- Crawl ---------------------------------------------------------------------------------
@@ -338,16 +337,16 @@ def test_a_new_file_that_fails_is_recorded_and_tried_again(site: FakeSite, tmp_p
 def test_a_crashed_run_is_continued_without_downloading_again(
     site: FakeSite, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    finish = rulings.finish
+    finish = run.finish
 
-    def crash(state: rulings.Run, counts: rulings.FileCounts) -> snapshot.RunHeader:
+    def crash(state: run.Run, counts: run.FileCounts) -> snapshot.RunHeader:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(rulings, "finish", crash)
+    monkeypatch.setattr(run, "finish", crash)
     with pytest.raises(KeyboardInterrupt):
         run_once(site, tmp_path)
     assert snapshot.journal_path(tmp_path, snapshot.run_id(T0)).is_file()
-    monkeypatch.setattr(rulings, "finish", finish)
+    monkeypatch.setattr(run, "finish", finish)
     site.forget()
     later = T0 + timedelta(hours=1)
     header = run_once(site, tmp_path, later)
@@ -393,9 +392,9 @@ def test_main_exits_non_zero_on_a_broken_or_partial_run(
     reason = "list page failed" if status == "broken" else None
     header = snapshot.RunHeader(run="r", status=status, reason=reason, previous=None)
     monkeypatch.setattr(fetch, "make_client", httpx.Client)
-    monkeypatch.setattr(rulings, "ingest", lambda client: header)
+    monkeypatch.setattr(run, "ingest", lambda client: header)
     with pytest.raises(SystemExit) as exit_info:
-        rulings.main()
+        run.main()
     assert exit_info.value.code == code
 
 
@@ -404,6 +403,6 @@ def test_main_returns_on_an_ok_run(
 ) -> None:
     header = snapshot.RunHeader(run="r", status="ok", previous=None)
     monkeypatch.setattr(fetch, "make_client", httpx.Client)
-    monkeypatch.setattr(rulings, "ingest", lambda client: header)
-    rulings.main()
+    monkeypatch.setattr(run, "ingest", lambda client: header)
+    run.main()
     assert capsys.readouterr().out.startswith("rulings: ok;")
