@@ -12,11 +12,11 @@ from collections import Counter
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
-from lawclerk.ingest import rulings
 from lawclerk.ingest.rulings import fetch, parse
+from lawclerk.ingest.rulings.crawl import BOUNDARY, crawl
 
 failures = 0
-GZ, TOPICS = rulings.BOUNDARY
+GZ, TOPICS = BOUNDARY
 
 
 def top_folder(url: str) -> str:
@@ -42,7 +42,7 @@ def check(name: str, problems: list[str]) -> None:
 def main() -> None:
     """Crawl, print the counts and run the checks."""
     with fetch.make_client() as client:
-        result = rulings.crawl(client)
+        result = crawl(client)
     pages = result.pages
     loaded = result.loaded()
     print(f"pages: {len(loaded)} loaded, {len(pages) - len(loaded)} failed")

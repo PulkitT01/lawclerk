@@ -10,6 +10,7 @@ import pytest
 
 from lawclerk.ingest import rulings
 from lawclerk.ingest.rulings import fetch, snapshot
+from lawclerk.ingest.rulings.crawl import LISTS
 from lawclerk.ingest.rulings.snapshot import RowLine
 
 
@@ -60,7 +61,7 @@ DATA = "https://data.bundesnetzagentur.de/Bundesnetzagentur"
 
 GZ = "DE/Beschlusskammern/1_GZ/BK6-GZ/2026/BK6-26-001"
 
-CLOSED, ONGOING = rulings.LISTS
+CLOSED, ONGOING = LISTS
 
 DECISION = f"{SITE}/{GZ}/BK6-26-001_beschluss.html"
 
