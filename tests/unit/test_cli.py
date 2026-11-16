@@ -65,3 +65,10 @@ def test_rulings_is_registered_with_the_rulings_ingester() -> None:
     from lawclerk.ingest import rulings
 
     assert cli.INGESTERS["rulings"] is rulings.main
+
+
+def test_ingest_keeps_httpx_quiet(calls: list[str]) -> None:
+    import logging
+
+    cli.main(["ingest", "rulings"])
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING

@@ -37,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not Path("pyproject.toml").is_file():
         parser.error("run this from the repository root (the folder with pyproject.toml)")
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request otherwise
     kinds = [args.kind] if args.kind else list(INGESTERS)
     for kind in kinds:
         INGESTERS[kind]()
