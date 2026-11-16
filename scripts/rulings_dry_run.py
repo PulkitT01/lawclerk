@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import fetch
+from lawclerk.ingest.rulings import fetch, parse
 
 failures = 0
 GZ, TOPICS = rulings.BOUNDARY
@@ -62,7 +62,7 @@ def main() -> None:
         parts = urlsplit(url)
         kind = (parts.netloc, PurePosixPath(parts.path).suffix.lower() or "-")
         by_type[kind] += 1
-        size = next((s for link in links if (s := rulings.size_from_text(link.text))), None)
+        size = next((s for link in links if (s := parse.size_from_text(link.text))), None)
         folder_files[top_folder(url)] += 1
         folder_bytes[top_folder(url)] += size or 0
         if size is None:

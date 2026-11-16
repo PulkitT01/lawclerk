@@ -32,7 +32,7 @@ from conftest import (
 )
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import FileLine, Link, PageLine, RowLine, SkippedLine, fetch
+from lawclerk.ingest.rulings import FileLine, Link, PageLine, RowLine, SkippedLine, fetch, parse
 
 # --- URLs, paths, text ---------------------------------------------------------------------
 
@@ -74,61 +74,7 @@ def test_resource_dir_refuses_urls_that_could_leave_the_root(url: str) -> None:
         rulings.resource_dir(url)
 
 
-@pytest.mark.parametrize(
-    ("text", "size"),
-    [
-        ("Konsultationsdokument (pdf\xa0/ 220 KB)", 220_000),
-        ("Anlage (pdf / 2,5 MB)", 2_500_000),
-        ("Liste (xlsx / 1.024 KB)", 1_024_000),
-        ("Änderungsbeschluss vom 18.01.2021", None),
-    ],
-)
-def test_size_from_text(text: str, size: int | None) -> None:
-    assert rulings.size_from_text(text) == size
-
-
-def test_main_sha256_ignores_the_menu() -> None:
-    one = page("<p>Text</p>", nav='<a href="x">A</a>').encode()
-    other = page("<p>Text</p>", nav='<a href="y">B</a>').encode()
-    changed = page("<p>Neuer Text</p>").encode()
-    assert rulings.main_sha256(one) == rulings.main_sha256(other) != rulings.main_sha256(changed)
-    assert rulings.main_sha256(b"<html><body>no main</body></html>") is None
-
-
-def test_squash_collapses_whitespace_and_non_breaking_spaces() -> None:
-    assert rulings.squash(" a\xa0 b\n c ") == "a b c"
-
-
 # --- Parsing -------------------------------------------------------------------------------
-
-
-def test_parse_page_reads_base_canonical_and_only_links_in_main() -> None:
-    parsed = rulings.parse_page(page('<a href="DE/a.html?nn=1">Seite&nbsp;A</a>').encode())
-    assert parsed.base == "/"
-    assert parsed.canonical == "http://x/y.html"
-    assert parsed.has_main
-    assert parsed.links == [("DE/a.html?nn=1", "Seite A")]
-
-
-def test_parse_page_reads_list_rows_without_the_header() -> None:
-    body = list_page(
-        '<tr><td>BK6-18-004- RAM</td><td><p>Text <abbr title="Absatz">Abs.</abbr> 3</p>'
-        '<a href="DE/x.html?nn=1">Beschluss</a></td><td>A GmbH</td><td></td></tr>'
-    )
-    (row,) = rulings.parse_page(body.encode()).rows
-    assert row.cells == ["BK6-18-004- RAM", "Text Abs. 3 Beschluss", "A GmbH", ""]
-    assert row.links == [("DE/x.html?nn=1", "Beschluss")]
-
-
-def test_parse_page_closes_a_link_opened_inside_another() -> None:
-    parsed = rulings.parse_page(
-        page('<a href="https://x/a.html">A <a href="https://x/b.html">B</a>').encode()
-    )
-    assert parsed.links == [("https://x/a.html", "A"), ("https://x/b.html", "B")]
-
-
-def test_parse_page_without_main() -> None:
-    assert not rulings.parse_page(b"<html><body><a href='x'>x</a></body></html>").has_main
 
 
 # --- Snapshots and storage ------------------------------------------------------------------
@@ -233,7 +179,7 @@ def crawl_of(loaded: dict[str, set[str]], failed: tuple[str, ...] = ()) -> rulin
     """A crawl result: pages that loaded with the hrefs they show, and pages that failed."""
     result = rulings.Crawl(shown=loaded)
     for url in loaded:
-        result.pages[url] = rulings.Page(url, 1, [], parsed=rulings.parse_page(b"<main></main>"))
+        result.pages[url] = rulings.Page(url, 1, [], parsed=parse.parse_page(b"<main></main>"))
     for url in failed:
         result.pages[url] = rulings.Page(url, 1, [], failed="HTTP 500")
     return result
@@ -276,10 +222,10 @@ def test_check_counts_returns_the_rule_that_breaks_the_run() -> None:
         run="r0", header=rulings.RunHeader(run="r0", status="ok", previous=None, rows=10)
     )
     result = crawl_of({"A": set()})
-    result.rows = [("list", rulings.Row(["x"], []))] * 8
+    result.rows = [("list", parse.Row(["x"], []))] * 8
     broken = rulings.check_counts(result, previous)
     assert broken is not None and broken.rule == "too_few_rows"
-    result.rows = [("list", rulings.Row(["x"], []))] * 9
+    result.rows = [("list", parse.Row(["x"], []))] * 9
     assert rulings.check_counts(result, previous) is None
 
 
