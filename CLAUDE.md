@@ -28,7 +28,7 @@ All four checks must pass before a change is done. CI runs them on every PR.
 - `docs/adr/`: one file per design decision; `docs/devlog/`: daily notes
 - `data/`: downloads and processed files, gitignored
 
-Built: `ingest` (statutes), `cli`. Planned: retrieval, api, agent, evals.
+Built: `ingest` (statutes, rulings), `cli`. Planned: retrieval, api, agent, evals.
 
 ## Conventions
 
