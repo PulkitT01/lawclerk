@@ -413,3 +413,11 @@ def test_status_lines_are_flushed_at_once(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("builtins.print", lambda text, flush=False: printed.append((text, flush)))
     run.say("rulings: first download")
     assert printed == [("rulings: first download", True)]
+
+
+def test_a_run_that_stores_nothing_leaves_no_journal(site: FakeSite, tmp_path: Path) -> None:
+    run_once(site, tmp_path)
+    assert snapshot.journal_path(tmp_path, snapshot.run_id(T0)).is_file()
+    later = T0 + timedelta(hours=1)
+    run_once(site, tmp_path, later)
+    assert not snapshot.journal_path(tmp_path, snapshot.run_id(later)).exists()

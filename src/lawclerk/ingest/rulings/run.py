@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, Self, TextIO
 from urllib.parse import urlsplit
 
 import httpx
@@ -249,6 +249,28 @@ def fetch_url(url: str, v: str | None) -> str:
     return url
 
 
+class Journal:
+    """A run's journal file, created with its first line: a run that stores nothing has none."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._file: TextIO | None = None
+
+    def write(self, line: FileLine) -> None:
+        """Append a line and flush it, so a kill loses at most this one."""
+        if self._file is None:
+            self._file = self.path.open("a", encoding="utf-8")
+        self._file.write(line.model_dump_json() + "\n")
+        self._file.flush()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._file is not None:
+            self._file.close()
+
+
 def record_files(state: Run, announce: Callable[[str], None]) -> FileCounts:
     """Download what is new, changed or due for a re-check; carry everything else."""
     counts = FileCounts()
@@ -259,8 +281,8 @@ def record_files(state: Run, announce: Callable[[str], None]) -> FileCounts:
         announce(expected_size(state.crawl, list(urls)))
 
     downloads: dict[str, Download] = {}
-    journal = journal_path(state.root, state.run)
-    with ThreadPoolExecutor(MAX_CONCURRENT) as pool, journal.open("a", encoding="utf-8") as log:
+    journal = Journal(journal_path(state.root, state.run))
+    with ThreadPoolExecutor(MAX_CONCURRENT) as pool, journal:
 
         def get_file(url: str) -> Download:
             target = fetch_url(url, vs[url])
@@ -273,8 +295,7 @@ def record_files(state: Run, announce: Callable[[str], None]) -> FileCounts:
                 url, done = futures[future], future.result()
                 downloads[url] = done
                 if done.stored is not None:
-                    log.write(file_line(state, url, done, vs[url]).model_dump_json() + "\n")
-                    log.flush()
+                    journal.write(file_line(state, url, done, vs[url]))
         except FirewallError as exc:
             pool.shutdown(cancel_futures=True)
             raise BrokenRunError("firewall", f"firewall rejected {exc}") from exc
