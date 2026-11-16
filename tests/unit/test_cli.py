@@ -59,3 +59,9 @@ def test_statutes_is_registered_with_the_statutes_ingester() -> None:
     from lawclerk.ingest import statutes
 
     assert cli.INGESTERS["statutes"] is statutes.main
+
+
+def test_rulings_is_registered_with_the_rulings_ingester() -> None:
+    from lawclerk.ingest import rulings
+
+    assert cli.INGESTERS["rulings"] is rulings.main

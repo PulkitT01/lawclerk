@@ -1,4 +1,4 @@
-"""Command line entry point: ``uv run lawclerk ingest [statutes]``."""
+"""Command line entry point: ``uv run lawclerk ingest [statutes|rulings]``."""
 
 import argparse
 import logging
@@ -6,10 +6,13 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
-from lawclerk.ingest import statutes
+from lawclerk.ingest import rulings, statutes
 
 # Kind of document -> function that ingests all documents of that kind
-INGESTERS: Final[dict[str, Callable[[], None]]] = {"statutes": statutes.main}
+INGESTERS: Final[dict[str, Callable[[], None]]] = {
+    "statutes": statutes.main,
+    "rulings": rulings.main,
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
