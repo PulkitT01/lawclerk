@@ -29,9 +29,8 @@ from conftest import (
 )
 
 from lawclerk.ingest import rulings
-from lawclerk.ingest.rulings import fetch, parse, snapshot, store
-from lawclerk.ingest.rulings.crawl import Crawl, Page
-from lawclerk.ingest.rulings.snapshot import FileLine, Link, PageLine, RowLine, SkippedLine
+from lawclerk.ingest.rulings import changes, fetch, snapshot, store
+from lawclerk.ingest.rulings.snapshot import FileLine, PageLine, RowLine, SkippedLine
 
 # --- URLs, paths, text ---------------------------------------------------------------------
 
@@ -42,107 +41,6 @@ pytestmark = pytest.mark.usefixtures("no_backoff")
 
 
 # --- Snapshots and storage ------------------------------------------------------------------
-
-
-def known_files(count: int) -> rulings.Previous:
-    """A last good run at T0 with count files, file 1 checked longest ago."""
-    previous = rulings.Previous(run=snapshot.run_id(T0))
-    stored = snapshot.Stored(path="p", sha256="s", run="r")
-    for number in range(1, count + 1):
-        url = f"{SITE}/f{number:02d}.pdf"
-        checked = snapshot.run_id(T0 - timedelta(days=count - number))
-        previous.files[url] = FileLine(
-            seen="observed",
-            url=url,
-            found_on=[],
-            v="1",
-            hash="checked",
-            checked=checked,
-            content_type=None,
-            bytes=1,
-            stored=stored,
-            first_seen="r",
-            baseline=True,
-        )
-    return previous
-
-
-@pytest.mark.parametrize(
-    ("since", "due"),
-    [
-        (timedelta(hours=1), 0),
-        (timedelta(days=1), 0),
-        (timedelta(days=3), 2),
-        (timedelta(days=30), 20),
-        (timedelta(days=120), 60),
-    ],
-)
-def test_rotation_share_follows_the_time_since_the_last_good_run(
-    since: timedelta, due: int
-) -> None:
-    previous = known_files(60)
-    picked = rulings.rotation(
-        previous, [*previous.files, f"{SITE}/new.pdf"], snapshot.run_id(T0 + since)
-    )
-    assert picked == {f"{SITE}/f{number:02d}.pdf" for number in range(1, due + 1)}
-
-
-def test_rotation_before_the_first_good_run_picks_nothing() -> None:
-    assert rulings.rotation(rulings.Previous(), [PDF], snapshot.run_id(T0)) == set()
-
-
-def crawl_of(loaded: dict[str, set[str]], failed: tuple[str, ...] = ()) -> Crawl:
-    """A crawl result: pages that loaded with the hrefs they show, and pages that failed."""
-    result = Crawl(shown=loaded)
-    for url in loaded:
-        result.pages[url] = Page(url, 1, [], parsed=parse.parse_page(b"<main></main>"))
-    for url in failed:
-        result.pages[url] = Page(url, 1, [], failed="HTTP 500")
-    return result
-
-
-def test_kept_links_drops_only_links_a_loaded_page_no_longer_shows() -> None:
-    result = crawl_of({"A": {"still.html"}}, failed=("B",))
-    still, dropped = Link(page="A", text="", href="still.html"), Link(page="A", text="", href="x")
-    on_failed, unreached = Link(page="B", text="", href="y"), Link(page="C", text="", href="z")
-    assert rulings.kept_links(result, [still, dropped, on_failed]) == (
-        [still, on_failed],
-        "page_failed",
-    )
-    assert rulings.kept_links(result, [unreached]) == ([unreached], "page_not_reached")
-    assert rulings.kept_links(result, [dropped]) == ([], None)
-
-
-def test_unseen_turns_a_line_gone_or_carried() -> None:
-    line = SkippedLine(
-        seen="observed",
-        url="u",
-        found_on=[Link(page="A", text="", href="x")],
-        reason="off_site",
-        first_seen="r0",
-        baseline=True,
-    )
-    gone = rulings.unseen(crawl_of({"A": set()}), line, "r1")
-    assert (gone.seen, gone.gone_since) == ("gone", "r1")
-    carried = rulings.unseen(crawl_of({}, failed=("A",)), line, "r1")
-    assert (carried.seen, carried.carried_because) == ("carried", "page_failed")
-
-
-def test_origin_keeps_first_seen_and_marks_the_first_run_as_baseline() -> None:
-    assert rulings.origin(None, "r1", None) == {"first_seen": "r1", "baseline": True}
-    assert rulings.origin(None, "r2", "r1") == {"first_seen": "r2", "baseline": False}
-
-
-def test_check_counts_returns_the_rule_that_breaks_the_run() -> None:
-    previous = rulings.Previous(
-        run="r0", header=snapshot.RunHeader(run="r0", status="ok", previous=None, rows=10)
-    )
-    result = crawl_of({"A": set()})
-    result.rows = [("list", parse.Row(["x"], []))] * 8
-    broken = rulings.check_counts(result, previous)
-    assert broken is not None and broken.rule == "too_few_rows"
-    result.rows = [("list", parse.Row(["x"], []))] * 9
-    assert rulings.check_counts(result, previous) is None
 
 
 def test_summary_gives_the_age_of_the_oldest_check() -> None:
@@ -235,7 +133,7 @@ def test_a_link_its_page_no_longer_shows_is_gone_and_its_file_stays(
 def test_a_failed_page_says_nothing_about_its_links(
     site: FakeSite, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(rulings, "MIN_RATIO", 0.5)  # 5 of 6 pages on this tiny site
+    monkeypatch.setattr(changes, "MIN_RATIO", 0.5)  # 5 of 6 pages on this tiny site
     run_once(site, tmp_path)
     site.routes[NOTICE] = lambda _: httpx.Response(500)
     later = T0 + timedelta(days=1)
@@ -250,7 +148,7 @@ def test_a_failed_page_says_nothing_about_its_links(
 def test_a_page_nobody_reaches_is_carried_with_its_files(
     site: FakeSite, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(rulings, "MIN_RATIO", 0.5)  # 5 of 6 pages on this tiny site
+    monkeypatch.setattr(changes, "MIN_RATIO", 0.5)  # 5 of 6 pages on this tiny site
     run_once(site, tmp_path)
     site.decision_links = [link for link in site.decision_links if "Mitteilung" not in link]
     later = T0 + timedelta(days=1)
@@ -291,7 +189,7 @@ def test_a_re_check_counts_new_content_under_the_same_v(
     run_once(site, tmp_path)
     old = by_url(tmp_path)[PDF]
     site.routes[f"{PDF}?__blob=publicationFile&v=1"] = lambda _: pdf(b"%PDF quietly replaced")
-    monkeypatch.setattr(rulings, "RECHECK_PERIOD", timedelta(days=1))
+    monkeypatch.setattr(changes, "RECHECK_PERIOD", timedelta(days=1))
     later = T0 + timedelta(days=2)
     header = run_once(site, tmp_path, later)
     new = by_url(tmp_path, later)[PDF]
@@ -466,10 +364,10 @@ def test_too_few_pages_leaves_out_pages_no_link_leads_to(
 ) -> None:
     run_once(site, tmp_path)
     site.decision_links = [link for link in site.decision_links if "Mitteilung" not in link]
-    monkeypatch.setattr(rulings, "MIN_RATIO", 0.5)
+    monkeypatch.setattr(changes, "MIN_RATIO", 0.5)
     later = T0 + timedelta(days=1)
     run_once(site, tmp_path, later)  # the notice is now carried as page_not_reached
-    monkeypatch.setattr(rulings, "MIN_RATIO", 0.9)
+    monkeypatch.setattr(changes, "MIN_RATIO", 0.9)
     # 6 loaded of 6 observed: ok. Counting the unreached notice (6 of 7) would break it.
     assert run_once(site, tmp_path, later + timedelta(days=1)).status == "ok"
 
