@@ -1,0 +1,111 @@
+# 0004: BK6 rulings fetched into a raw archive, one snapshot per run
+
+Status: accepted (16-11-2026), after the first real runs passed.
+
+## Context
+- Nobody archives BK6. Each run is one snapshot, and `data/raw/rulings/` is the only archive.
+- Scope: fetch, store, record. Labels, OCR and chunks come later.
+- Site, measured 15-11-2026:
+  - Two lists: closed 388 rows, ongoing 22. Four columns each. BK6-19-016 is in both.
+  - `Last-Modified` is the request time, ETag comes and goes, no `Content-Length` on www files, Range ignored. No header tells a change.
+  - The server ignores `v`: every value returns the same bytes.
+  - A file path without its query answers 301 to `?__blob=publicationFile&v=<n>`. That is the site's current `v`, with no download.
+  - 103 `.html` links answer 301 to a file.
+  - The menu changes page bytes without a change in `<main>` (5 of 32 pages in 25 minutes).
+  - `?nn=` changes page bytes. Pages are fetched without it.
+  - The data host sends `Content-Length`, a stable `Last-Modified` and an ETag. `If-None-Match` answers 304.
+  - Neither host's robots.txt forbids our paths. The data host has none.
+  - Our own User-Agent passes on www and on data-host files.
+
+## Decision
+- `uv run lawclerk ingest rulings` (`rulings.main`), one more line in `INGESTERS` (ADR 0002 stays).
+- Code: the package `lawclerk.ingest.rulings`, one module per job.
+  - `fetch`: hosts, User-Agent, retries, the firewall check, the `v` redirect.
+  - `parse`: `<main>` links, list rows, sizes in link texts, the `<main>` hash.
+  - `snapshot`: line models, format version, reading and writing snapshots and journals.
+  - `store`: URL to path, never-overwrite storing, the streaming download.
+  - `crawl`: lists, boundary, page cap, sorting links into pages, files and skips.
+  - `changes`: rotation pick, gone or carried, the 90% rules, what to download. Takes the last snapshot and the crawl, returns decisions. No HTTP, no disk.
+  - `run`: `ingest`, building the snapshot, the summary, `main`.
+- Fetching: httpx and `html.parser` from the standard library. No new dependency.
+  - User-Agent `lawclerk/0.1 (+https://github.com/PulkitT01/lawclerk)`.
+  - At most 4 requests at once. 3 retries, backoff 2, 4, 8 s on network errors, 429, 5xx and the firewall page.
+  - No automatic redirects while crawling.
+- Boundary by path, not depth:
+  - Every page under `/DE/Beschlusskammern/1_GZ/BK6-GZ/` and `/DE/Beschlusskammern/BK06/`: all of BK6.
+  - BK07, BK7-GZ, `_SharedDocs` and everything else stay outside, recorded as skipped.
+  - Links come from the list tables and from `<main>`. Menu links are ignored.
+  - More than 2000 pages is a broken run.
+- Layout: `<host>/<decoded URL path>/<sha256[:12]><suffix>`.
+  - One folder per URL. A changed file is a new name in the same folder. Nothing is overwritten or deleted.
+  - Segments that are empty, start with `.` or hold `/`, `\` or NUL are refused. The resolved path must stay inside the root.
+  - Such a URL is a skipped link (`unsafe_path`), not a crash.
+  - Pages are stored raw. A new copy only when the hash of `<main>` changed.
+- Record: `runs/<run>.jsonl`, one snapshot per run, format version 1.
+  - Header: status, counts, pages per depth, `v` differences, oldest check.
+  - Lines: `row`, `page`, `file`, `skipped`.
+  - `seen`: `observed`, `carried` (`page_failed` or `page_not_reached`) or `gone`. Gone lines stay in every later snapshot.
+  - `found_on` / `links`: `{page, text, href}`, with the href as the page had it.
+  - `stored`: `{path, sha256, run}`. The run is when this content became current.
+  - `first_seen` is ours. `baseline` marks what the first good run found.
+  - The next run reads only the last good snapshot.
+  - A snapshot is written in one step. Files are logged in `runs/<run>.journal.jsonl` as each one is stored, in the order they finish. After a crash the next run reuses them. A cut-off last line is ignored.
+  - The journal is created with its first line. A run that stores nothing has none.
+  - The no-delete rule covers stored copies, snapshots and journals. Journals are kept; later runs ignore those of good runs.
+  - `.tmp/` is scratch: its leftovers are cleared at the start of a run.
+- Rows are keyed by list and Aktenzeichen. A list with the same Aktenzeichen twice stops the run.
+- Change check:
+  - New URL: download.
+  - www: download again when the site's `v` (from the 301) differs from the recorded one. The `v` the links show is kept in `found_on`; differences are counted.
+  - If the firewall rejects the `v` check, the rest use the links' `v`.
+  - Data host: a known file is asked with its ETag (`If-None-Match`). 304 is unchanged, 200 is stored. No ETag: rotation only.
+  - Rotation (`RECHECK_PERIOD` = 90 days): each run re-downloads the share of known files that matches the time since the last good run (1 day: 1/90, 30 days: 1/3, at most all), rounded down, longest-unchecked first. Data-host files included.
+  - 90 days, not 30: the set is 3.6 times the first estimate, and the data host has real ETags.
+  - Running often adds no load; running rarely still covers everything. A second run right after downloads nothing.
+  - New content under an unchanged `v` is counted in the header (`changed_same_v`).
+- Download: everything on both hosts.
+  - Video is skipped by content type, before the body.
+  - Over 100 MB is skipped: by `Content-Length` where there is one, else while streaming.
+  - Skipped links are recorded with a reason: `video`, `too_large`, `off_site`, `outside_boundary`, `unsafe_path`, `failed`. A failed one is tried again next run.
+- Gone:
+  - A link is gone only when its own page loaded and no longer shows its href. A shown link whose target failed (an `.html` redirect) is carried.
+  - A page nobody reached is carried, not gone, and so are its files.
+- Broken run, exit 1, header-only snapshot, nothing marked gone. `broken_rule` names the rule:
+  - `list_failed`: a list page fails;
+  - `firewall`: the firewall page appears;
+  - `page_cap`: more than 2000 pages;
+  - `too_few_rows`: fewer than 90% of the last good run's rows;
+  - `too_few_pages`: fewer pages loaded than 90% of the last snapshot's pages that were observed or carried as `page_failed`.
+- Partial run, exit 2: a page or a file failed. Its links are carried. It counts as a good run.
+- Exit 2 stops plain `lawclerk ingest` like exit 1. Fine while rulings is the last kind in `INGESTERS`.
+- Before the first download it prints the expected size from the link texts.
+- `scripts/rulings_dry_run.py` crawls and only counts. It fails if a page lacks a canonical link or `<main>`, a row doesn't have 4 cells, or a URL can't be stored.
+- The row field is `list_page`, not `list`, so it doesn't shadow the builtin.
+
+## Alternatives
+- Hochfrequenz `bnetza_bk6_scraper` helpers: its fetcher returns no status or redirects, and it would add aiohttp, bs4, lxml and typer.
+- Its `mirror` CLI: overwrites, misses notices, drops sub-folders (15 name collisions).
+- bs4 and lxml: shorter parsing, two new runtime dependencies.
+- Content-addressed blobs: safest paths, but not browsable without the record.
+- Event log, or one manifest updated in place: replay code, or history only as far as the fields go.
+- Trust the links' `v`: a page can show an old link, and 41 data-host links have none.
+- Re-download everything each run: about 1 GB per run.
+- Skip comment files: about 237 MB less, but lost for good if the site drops them.
+- Crawl by depth: BK6 pages turn up as deep as depth 6.
+- Topic folders taken from list rows: missed `BK6_83_Zug_Mess`, the largest folder.
+- A fixed 1/30 per run, or a minimum age: load grows with how often it runs.
+
+## Consequences
+- First run (dry run 16-11-2026): 643 pages, 2830 file links, at least 3021 MB, 201 of unknown size.
+- Real first run: 3.5 GB on disk, about 10 min. A run with nothing new takes under 2 min.
+- A snapshot is about 4.2 MB, so daily runs add about 1.5 GB a year. Left as is for now.
+- Page lines change `checked` on every run, so two quiet runs' snapshots differ in all page lines.
+- Status lines are flushed at once, and httpx logs only from WARNING up.
+  - `BK6_83_Zug_Mess` alone: 72 pages, 1198 files, 1699 MB. `BK6_81_GPKE_GeLi`: 51 pages, 487 files, 497 MB.
+- Every run sends about 2600 extra requests for the `v` check, with no bodies, and about 100 conditional ones to the data host.
+- The parser matches bs4 on all 519 saved pages: same `<main>` links, same row text up to whitespace.
+- A broken run's files are reused through its journal. Its snapshot holds only the header.
+- A skipped video or too-large file is not requested again.
+- Two URLs that differ only in case would share a folder on macOS. None do today.
+- Joint BK6/BK7 notices under `/DE/Beschlusskammern/_SharedDocs/` stay outside.
+- Pages that no link leads to any more are carried forever. They don't count in the 90% rule, or removed pages would raise the bar until every run broke.
