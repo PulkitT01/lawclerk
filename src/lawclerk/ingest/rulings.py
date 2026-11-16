@@ -869,52 +869,54 @@ class Run:
     crawl: Crawl
     lines: list[AnyLine] = field(default_factory=list)
 
-    def origin(self, before: Tracked | None) -> Origin:
-        """Return first_seen and baseline: kept from before, or this run's."""
-        if before is None:
-            return Origin(first_seen=self.run, baseline=self.previous.run is None)
-        return Origin(first_seen=before.first_seen, baseline=before.baseline)
 
-    def kept_links(self, links: Sequence[Link]) -> tuple[list[Link], CarriedBecause | None]:
-        """Keep the earlier links whose pages didn't load this run, and say why.
+def origin(before: Tracked | None, run: str, previous_run: str | None) -> Origin:
+    """Return first_seen and baseline: kept from before, or this run's."""
+    if before is None:
+        return Origin(first_seen=run, baseline=previous_run is None)
+    return Origin(first_seen=before.first_seen, baseline=before.baseline)
 
-        A link is dropped only when its page loaded and no longer shows its href. Nothing
-        kept means gone. A link kept because its page failed, or because its page still
-        shows it but its target (such as an .html redirect) failed, is page_failed;
-        otherwise page_not_reached.
-        """
-        loaded, shown = self.crawl.loaded(), self.crawl.shown
-        kept = [
-            link
-            for link in links
-            if link.page not in loaded or link.href in shown.get(link.page, set())
-        ]
-        if any(link.page in self.crawl.pages for link in kept):
-            return kept, "page_failed"
-        return kept, "page_not_reached" if kept else None
 
-    def links_now(
-        self, before: PageLine | FileLine | SkippedLine | None, links: list[Link]
-    ) -> list[Link]:
-        """This run's links plus the earlier ones whose pages didn't load, each once."""
-        kept = self.kept_links(before.found_on)[0] if before is not None else []
-        merged: dict[tuple[str, str], Link] = {}
-        for link in [*links, *kept]:
-            merged.setdefault((link.page, link.href), link)
-        return list(merged.values())
+def kept_links(crawl: Crawl, links: Sequence[Link]) -> tuple[list[Link], CarriedBecause | None]:
+    """Keep the earlier links whose pages didn't load this run, and say why.
 
-    def unseen(self, line: AnyLine) -> AnyLine:
-        """Turn a line this run didn't observe into a carried or a gone line."""
-        if line.seen == "gone":
-            return line
-        links = line.links if isinstance(line, RowLine) else line.found_on
-        kept, because = self.kept_links(links)
-        if because is None:
-            return line.model_copy(
-                update={"seen": "gone", "carried_because": None, "gone_since": self.run}
-            )
-        found = {} if isinstance(line, RowLine) else {"found_on": kept}
-        return line.model_copy(update={"seen": "carried", "carried_because": because, **found})
+    A link is dropped only when its page loaded and no longer shows its href. Nothing
+    kept means gone. A link kept because its page failed, or because its page still
+    shows it but its target (such as an .html redirect) failed, is page_failed;
+    otherwise page_not_reached.
+    """
+    loaded, shown = crawl.loaded(), crawl.shown
+    kept = [
+        link
+        for link in links
+        if link.page not in loaded or link.href in shown.get(link.page, set())
+    ]
+    if any(link.page in crawl.pages for link in kept):
+        return kept, "page_failed"
+    return kept, "page_not_reached" if kept else None
+
+
+def links_now(
+    crawl: Crawl, before: PageLine | FileLine | SkippedLine | None, links: list[Link]
+) -> list[Link]:
+    """This run's links plus the earlier ones whose pages didn't load, each once."""
+    kept = kept_links(crawl, before.found_on)[0] if before is not None else []
+    merged: dict[tuple[str, str], Link] = {}
+    for link in [*links, *kept]:
+        merged.setdefault((link.page, link.href), link)
+    return list(merged.values())
+
+
+def unseen(crawl: Crawl, line: AnyLine, run: str) -> AnyLine:
+    """Turn a line this run didn't observe into a carried or a gone line."""
+    if line.seen == "gone":
+        return line
+    links = line.links if isinstance(line, RowLine) else line.found_on
+    kept, because = kept_links(crawl, links)
+    if because is None:
+        return line.model_copy(update={"seen": "gone", "carried_because": None, "gone_since": run})
+    found = {} if isinstance(line, RowLine) else {"found_on": kept}
+    return line.model_copy(update={"seen": "carried", "carried_because": because, **found})
 
 
 def ingest(
@@ -935,7 +937,9 @@ def ingest(
     previous = Previous.of(last_good_snapshot(root))
     try:
         result = crawl(client)
-        check_counts(result, previous)
+        broken = check_counts(result, previous)
+        if broken is not None:
+            raise broken
         state = Run(client, root, run, previous, result)
         record_rows(state)
         record_pages(state)
@@ -950,29 +954,31 @@ def ingest(
     return finish(state, counts)
 
 
-def check_counts(result: Crawl, previous: Previous) -> None:
-    """Raise BrokenRunError if rows or loaded pages fell below MIN_RATIO of the last run.
+def check_counts(result: Crawl, previous: Previous) -> BrokenRunError | None:
+    """Return why the run is broken if rows or loaded pages fell below MIN_RATIO of the
+    last run, or None.
 
     Pages count against the last snapshot's pages that were observed or carried because a
     page failed, so a run of partial runs can't lower the bar. Pages no link leads to any
     more are left out, or they would raise it forever.
     """
     if previous.header is None:
-        return
+        return None
     listed = sum(
         page.seen == "observed" or page.carried_because == "page_failed"
         for page in previous.pages.values()
     )
     rows, pages = len(result.rows), len(result.loaded())
     if rows < MIN_RATIO * previous.header.rows:
-        raise BrokenRunError(
+        return BrokenRunError(
             "too_few_rows", f"{rows} list rows, the last good run had {previous.header.rows}"
         )
     if pages < MIN_RATIO * listed:
-        raise BrokenRunError(
+        return BrokenRunError(
             "too_few_pages",
             f"{pages} pages loaded, the last snapshot has {listed} observed or failed",
         )
+    return None
 
 
 def record_rows(state: Run) -> None:
@@ -989,11 +995,13 @@ def record_rows(state: Run) -> None:
                 aktenzeichen=aktenzeichen,
                 cells=row.cells,
                 links=[Link(page=list_page, text=text, href=href) for href, text in row.links],
-                **state.origin(state.previous.rows.get(key)),
+                **origin(state.previous.rows.get(key), state.run, state.previous.run),
             )
         )
     state.lines += [
-        state.unseen(line) for key, line in state.previous.rows.items() if key not in seen
+        unseen(state.crawl, line, state.run)
+        for key, line in state.previous.rows.items()
+        if key not in seen
     ]
 
 
@@ -1001,7 +1009,7 @@ def record_pages(state: Run) -> None:
     """Write a line per page; store a new copy when its <main> changed."""
     for url, page in state.crawl.pages.items():
         before = state.previous.pages.get(url)
-        found_on = state.links_now(before, page.found_on)
+        found_on = links_now(state.crawl, before, page.found_on)
         if page.parsed is None or page.body is None:
             update = {"seen": "carried", "carried_because": "page_failed", "found_on": found_on}
             state.lines.append(
@@ -1016,7 +1024,7 @@ def record_pages(state: Run) -> None:
                     checked=None,
                     main_sha256=None,
                     stored=None,
-                    **state.origin(None),
+                    **origin(None, state.run, state.previous.run),
                 )
             )
             continue
@@ -1033,13 +1041,13 @@ def record_pages(state: Run) -> None:
                 checked=state.run,
                 main_sha256=main,
                 stored=stored,
-                **state.origin(before),
+                **origin(before, state.run, state.previous.run),
             )
         )
     for url, line in state.previous.pages.items():
         if url not in state.crawl.pages:
             # A page nobody reached is never gone: its links are carried with it
-            kept, because = state.kept_links(line.found_on)
+            kept, because = kept_links(state.crawl, line.found_on)
             update = {"carried_because": because or "page_not_reached", "found_on": kept}
             state.lines.append(line.model_copy(update={"seen": "carried", **update}))
 
@@ -1120,7 +1128,11 @@ def rotation(previous: Previous, urls: Iterable[str], run: str) -> set[str]:
 
 
 def to_download(
-    state: Run, vs: dict[str, str | None], resumed: dict[str, FileLine]
+    previous: Previous,
+    crawl: Crawl,
+    vs: dict[str, str | None],
+    resumed: dict[str, FileLine],
+    run: str,
 ) -> dict[str, str | None]:
     """Return the files to request, each with the ETag to ask If-None-Match with, or None.
 
@@ -1128,10 +1140,9 @@ def to_download(
     ETag is asked with it. A file a crashed run already stored at the same v, or one
     skipped as video or too large before, is not requested again.
     """
-    previous = state.previous
-    due = rotation(previous, state.crawl.files, state.run)
+    due = rotation(previous, crawl.files, run)
     urls: dict[str, str | None] = {}
-    for url in state.crawl.files:
+    for url in crawl.files:
         before = previous.files.get(url)
         skipped = previous.skipped.get(url)
         if url in resumed and resumed[url].v == vs[url]:
@@ -1157,7 +1168,7 @@ def record_files(state: Run, announce: Callable[[str], None]) -> FileCounts:
     counts = FileCounts()
     vs = current_vs(state, counts)
     resumed = read_journals(state.root, state.previous.run)
-    urls = to_download(state, vs, resumed)
+    urls = to_download(state.previous, state.crawl, vs, resumed, state.run)
     if state.previous.run is None:
         announce(expected_size(state.crawl, list(urls)))
 
@@ -1187,7 +1198,7 @@ def record_files(state: Run, announce: Callable[[str], None]) -> FileCounts:
             file_or_skipped(state, url, links, downloads.get(url), resumed, vs, counts)
         )
     state.lines += [
-        state.unseen(line)
+        unseen(state.crawl, line, state.run)
         for url, line in state.previous.files.items()
         if url not in state.crawl.files
     ]
@@ -1206,7 +1217,7 @@ def file_or_skipped(
     """Build the line of a file seen this run, from its download or from earlier runs."""
     before = state.previous.files.get(url)
     skipped = state.previous.skipped.get(url)
-    found_on = state.links_now(before or skipped, links)
+    found_on = links_now(state.crawl, before or skipped, links)
     observed = {
         "seen": "observed",
         "carried_because": None,
@@ -1233,7 +1244,7 @@ def file_or_skipped(
             content_type=done.content_type,
             bytes=done.bytes,
             checked=state.run,
-            **state.origin(skipped or before),
+            **origin(skipped or before, state.run, state.previous.run),
         )
     if done is not None:
         counts.failed += 1  # a failed re-check keeps the old copy; a failed new file is skipped
@@ -1251,7 +1262,7 @@ def file_or_skipped(
         found_on=found_on,
         reason="failed",
         checked=state.run,
-        **state.origin(skipped),
+        **origin(skipped, state.run, state.previous.run),
     )
 
 
@@ -1272,7 +1283,7 @@ def file_line(state: Run, url: str, done: Download, v: str | None) -> FileLine:
         stored=before.stored if before is not None and unchanged else done.stored,
         etag=done.etag,
         last_modified=done.last_modified,
-        **state.origin(before),
+        **origin(before, state.run, state.previous.run),
     )
 
 
@@ -1297,14 +1308,16 @@ def record_skipped(state: Run) -> None:
             SkippedLine(
                 seen="observed",
                 url=url,
-                found_on=state.links_now(before, links),
+                found_on=links_now(state.crawl, before, links),
                 reason=reason,
-                **state.origin(before),
+                **origin(before, state.run, state.previous.run),
             )
         )
     written = {line.url for line in state.lines if isinstance(line, SkippedLine | FileLine)}
     state.lines += [
-        state.unseen(line) for url, line in state.previous.skipped.items() if url not in written
+        unseen(state.crawl, line, state.run)
+        for url, line in state.previous.skipped.items()
+        if url not in written
     ]
 
 

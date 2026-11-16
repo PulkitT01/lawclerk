@@ -402,6 +402,60 @@ def test_rotation_before_the_first_good_run_picks_nothing() -> None:
     assert rulings.rotation(rulings.Previous(), [PDF], rulings.run_id(T0)) == set()
 
 
+def crawl_of(loaded: dict[str, set[str]], failed: tuple[str, ...] = ()) -> rulings.Crawl:
+    """A crawl result: pages that loaded with the hrefs they show, and pages that failed."""
+    result = rulings.Crawl(shown=loaded)
+    for url in loaded:
+        result.pages[url] = rulings.Page(url, 1, [], parsed=rulings.parse_page(b"<main></main>"))
+    for url in failed:
+        result.pages[url] = rulings.Page(url, 1, [], failed="HTTP 500")
+    return result
+
+
+def test_kept_links_drops_only_links_a_loaded_page_no_longer_shows() -> None:
+    result = crawl_of({"A": {"still.html"}}, failed=("B",))
+    still, dropped = Link(page="A", text="", href="still.html"), Link(page="A", text="", href="x")
+    on_failed, unreached = Link(page="B", text="", href="y"), Link(page="C", text="", href="z")
+    assert rulings.kept_links(result, [still, dropped, on_failed]) == (
+        [still, on_failed],
+        "page_failed",
+    )
+    assert rulings.kept_links(result, [unreached]) == ([unreached], "page_not_reached")
+    assert rulings.kept_links(result, [dropped]) == ([], None)
+
+
+def test_unseen_turns_a_line_gone_or_carried() -> None:
+    line = SkippedLine(
+        seen="observed",
+        url="u",
+        found_on=[Link(page="A", text="", href="x")],
+        reason="off_site",
+        first_seen="r0",
+        baseline=True,
+    )
+    gone = rulings.unseen(crawl_of({"A": set()}), line, "r1")
+    assert (gone.seen, gone.gone_since) == ("gone", "r1")
+    carried = rulings.unseen(crawl_of({}, failed=("A",)), line, "r1")
+    assert (carried.seen, carried.carried_because) == ("carried", "page_failed")
+
+
+def test_origin_keeps_first_seen_and_marks_the_first_run_as_baseline() -> None:
+    assert rulings.origin(None, "r1", None) == {"first_seen": "r1", "baseline": True}
+    assert rulings.origin(None, "r2", "r1") == {"first_seen": "r2", "baseline": False}
+
+
+def test_check_counts_returns_the_rule_that_breaks_the_run() -> None:
+    previous = rulings.Previous(
+        run="r0", header=rulings.RunHeader(run="r0", status="ok", previous=None, rows=10)
+    )
+    result = crawl_of({"A": set()})
+    result.rows = [("list", rulings.Row(["x"], []))] * 8
+    broken = rulings.check_counts(result, previous)
+    assert broken is not None and broken.rule == "too_few_rows"
+    result.rows = [("list", rulings.Row(["x"], []))] * 9
+    assert rulings.check_counts(result, previous) is None
+
+
 def test_with_retries_retries_then_gives_up() -> None:
     attempts: list[int] = []
 
